@@ -6,6 +6,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from keep_alive import keep_alive
 
 # --- CONFIGURATION ---
+# REPLACE THIS WITH YOUR ACTUAL TOKEN IF IT'S NOT ALREADY HERE
 BOT_TOKEN = '8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU'
 
 logging.basicConfig(
@@ -16,10 +17,9 @@ logging.basicConfig(
 # --- DATA FETCHING FUNCTIONS ---
 
 def get_stock_data(ticker_symbol):
-    """Fetches price and daily % change using Yahoo Finance (Unlimited)"""
+    """Fetches price and daily % change using Yahoo Finance."""
     try:
         ticker = yf.Ticker(ticker_symbol)
-        # Get 2 days of data to calculate change
         history = ticker.history(period="2d")
         
         if len(history) < 2:
@@ -61,6 +61,24 @@ def get_crypto_data():
         logging.error(f"Error fetching crypto data: {e}")
         return None
 
+def get_defi_tvl():
+    """Fetches Total Value Locked (TVL) from DeFiLlama."""
+    try:
+        # Returns a list of historical TVL data points
+        url = "https://api.llama.fi/v2/historicalChainTvl"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        
+        if not data:
+            return 0
+            
+        # Get the very last item in the list (most recent data)
+        latest_tvl = data[-1]['tvl']
+        return latest_tvl
+    except Exception as e:
+        logging.error(f"Error fetching DeFi TVL: {e}")
+        return 0
+
 def format_number(num):
     if num >= 1_000_000_000_000:
         return f"${num / 1_000_000_000_000:.2f}T"
@@ -71,8 +89,8 @@ def format_number(num):
 
 def generate_report_text():
     crypto_data = get_crypto_data()
+    defi_tvl = get_defi_tvl()  # <--- NEW CALL
     
-    # ^GSPC is S&P 500, ^IXIC is NASDAQ
     sp500_price, sp500_change = get_stock_data("^GSPC")
     nasdaq_price, nasdaq_change = get_stock_data("^IXIC")
 
@@ -90,7 +108,8 @@ def generate_report_text():
         
         f"**Crypto Market Cap:**\n"
         f"🌍 Total: `{format_number(crypto_data['total_mcap'])}`\n"
-        f"🔵 Alts (Excl. BTC): `{format_number(crypto_data['alt_mcap'])}`\n\n"
+        f"🔵 Alts (Excl. BTC): `{format_number(crypto_data['alt_mcap'])}`\n"
+        f"🔒 DeFi TVL: `{format_number(defi_tvl)}`\n\n"  # <--- NEW LINE
         
         f"**Traditional Markets:**\n"
         f"{sp500_emoji} S&P 500: `{sp500_price:,.0f}` ({sp500_change:+.2f}%)\n"
