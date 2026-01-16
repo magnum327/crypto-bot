@@ -6,25 +6,22 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from keep_alive import keep_alive
 
 # --- CONFIGURATION ---
+# 1. TELEGRAM BOT TOKEN
 BOT_TOKEN = '8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU'
+
+# 2. COINMARKETCAP API KEY (Your new key)
+CMC_API_KEY = '9891d93949c7466cb1c8c762f7e6e600'
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-# --- HEADERS (To look like a real browser) ---
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept': 'application/json'
-}
-
 # --- HELPER FUNCTIONS ---
 
 def calculate_change(current, previous):
     """Calculates percentage change between two numbers."""
-    if previous == 0:
-        return 0.0
+    if previous == 0: return 0.0
     return ((current - previous) / previous) * 100
 
 def format_with_emoji(value, change_pct):
@@ -41,7 +38,7 @@ def format_with_emoji(value, change_pct):
         
     return f"{emoji} {val_str} ({sign}{change_pct:.2f}%)"
 
-# --- DATA FETCHING FUNCTIONS ---
+# --- DATA FETCHING ---
 
 def get_stock_data(ticker_symbol):
     try:
@@ -58,88 +55,106 @@ def get_stock_data(ticker_symbol):
         return 0.0, 0.0
 
 def get_crypto_data():
-    """Fetches data from CoinLore (Very lenient with Rate Limits)."""
+    """Fetches accurate data from CoinMarketCap."""
     try:
-        # 1. Global Data
-        # CoinLore returns a list with 1 item: [{"total_mcap": ..., "mcap_change": ...}]
-        global_resp = requests.get("https://api.coinlore.net/api/global/", headers=HEADERS, timeout=10)
-        g_data = global_resp.json()[0]
-        
-        # 2. Top 10 Tickers
-        tickers_resp = requests.get("https://api.coinlore.net/api/tickers/?start=0&limit=10", headers=HEADERS, timeout=10)
-        top_10 = tickers_resp.json()['data']
+        headers = {
+            'Accepts': 'application/json',
+            'X-CMC_PRO_API_KEY': CMC_API_KEY,
+        }
 
-        # --- Parse Global Metrics ---
-        total_mcap_now = float(g_data.get('total_mcap', 0))
-        total_change_pct = float(g_data.get('mcap_change', 0))
-        btc_dom = float(g_data.get('btc_d', 0))
+        # 1. Global Metrics (Total Cap, BTC Dom)
+        global_url = "https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest"
+        g_resp = requests.get(global_url, headers=headers)
+        g_data = g_resp.json().get('data', {})
         
-        # Calculate Total Cap 24h Ago
-        total_mcap_old = total_mcap_now / (1 + (total_change_pct / 100))
+        # Check if the API Key worked
+        if not g_data:
+            logging.error(f"CMC Error: {g_resp.json()}")
+            return None
+        
+        quote = g_data.get('quote', {}).get('USD', {})
+        total_mcap = quote.get('total_market_cap', 0)
+        total_change_pct = quote.get('total_market_cap_yesterday_percentage_change', 0)
+        btc_dom = g_data.get('btc_dominance', 0)
 
-        # --- Process Top 10 ---
+        # 2. Top 10 Listings (For Alts/Others Calc)
+        listings_url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+        params = {'start': '1', 'limit': '10', 'convert': 'USD', 'sort': 'market_cap'}
+        l_resp = requests.get(listings_url, headers=headers, params=params)
+        listings = l_resp.json().get('data', [])
+
+        # Process Top 10
         usdt_mcap = 0
-        sum_top10_now = 0
+        sum_top10 = 0
+        btc_mcap = 0
+        eth_mcap = 0
+
+        # Calculate 'Yesterday's' values to derive % change for Alts/Others
         sum_top10_old = 0
-        
-        btc_now = 0; btc_old = 0
-        eth_now = 0; eth_old = 0
+        btc_old = 0
+        eth_old = 0
 
-        for coin in top_10:
+        for coin in listings:
             symbol = coin['symbol']
-            price_now = float(coin['market_cap_usd'])
-            pct_change = float(coin['percent_change_24h'])
+            mcap = coin['quote']['USD']['market_cap']
+            pct_change = coin['quote']['USD']['percent_change_24h']
             
-            # Calculate old price
-            price_old = price_now / (1 + (pct_change / 100))
+            # Approximate 'old' mcap
+            mcap_old = mcap / (1 + (pct_change / 100))
             
-            sum_top10_now += price_now
-            sum_top10_old += price_old
+            sum_top10 += mcap
+            sum_top10_old += mcap_old
             
-            if symbol == 'USDT': usdt_mcap = price_now
-            if symbol == 'BTC': btc_now = price_now; btc_old = price_old
-            if symbol == 'ETH': eth_now = price_now; eth_old = price_old
+            if symbol == 'USDT': usdt_mcap = mcap
+            if symbol == 'BTC': btc_mcap = mcap; btc_old = mcap_old
+            if symbol == 'ETH': eth_mcap = mcap; eth_old = mcap_old
 
-        # --- Derived Metrics ---
-        usdt_dom = (usdt_mcap / total_mcap_now) * 100 if total_mcap_now > 0 else 0
-
+        # --- Calculations ---
+        
+        # USDT Dominance
+        usdt_dom = (usdt_mcap / total_mcap) * 100 if total_mcap > 0 else 0
+        
+        # Calculate Total Old (to derive Alts/Others change)
+        total_mcap_old = total_mcap / (1 + (total_change_pct / 100))
+        
         # Total ALTS (Total - BTC - ETH)
-        alts_now = total_mcap_now - btc_now - eth_now
+        alts_now = total_mcap - btc_mcap - eth_mcap
         alts_old = total_mcap_old - btc_old - eth_old
         alts_change = calculate_change(alts_now, alts_old)
-
-        # ALT Excluding Top 10 (Total - Top 10)
-        others_now = total_mcap_now - sum_top10_now
+        
+        # Others (Total - Top 10)
+        others_now = total_mcap - sum_top10
         others_old = total_mcap_old - sum_top10_old
         others_change = calculate_change(others_now, others_old)
 
         return {
             'btc_dom': btc_dom,
             'usdt_dom': usdt_dom,
-            'total_val': total_mcap_now,
+            'total_val': total_mcap,
             'total_pct': total_change_pct,
             'alts_val': alts_now,
             'alts_pct': alts_change,
             'others_val': others_now,
             'others_pct': others_change
         }
+
     except Exception as e:
-        logging.error(f"Error fetching crypto data: {e}")
+        logging.error(f"Error CMC: {e}")
         return None
 
 def get_defi_tvl():
     try:
         url = "https://api.llama.fi/v2/historicalChainTvl"
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp = requests.get(url, timeout=10)
         data = resp.json()
         if len(data) < 2: return 0, 0
-            
+        
         today = data[-1]['tvl']
         yesterday = data[-2]['tvl']
         change = calculate_change(today, yesterday)
         return today, change
     except Exception as e:
-        logging.error(f"Error fetching TVL: {e}")
+        logging.error(f"Error TVL: {e}")
         return 0, 0
 
 def generate_report_text():
@@ -151,9 +166,9 @@ def generate_report_text():
     ndq_p, ndq_c = get_stock_data("^IXIC")
 
     if not c_data:
-        return "⚠️ Error: Could not fetch data. (Check Render logs for details)"
+        return "⚠️ Error: Could not fetch data. Check if your CoinMarketCap Key is correct in the logs."
 
-    # Stock formatting
+    # Format Stocks
     dow_str = format_with_emoji(dow_p, dow_c).split(" (")[0] + f" ({'+' if dow_c>=0 else ''}{dow_c:.2f}%)"
     sp_str = format_with_emoji(sp_p, sp_c).split(" (")[0] + f" ({'+' if sp_c>=0 else ''}{sp_c:.2f}%)"
     ndq_str = format_with_emoji(ndq_p, ndq_c).split(" (")[0] + f" ({'+' if ndq_c>=0 else ''}{ndq_c:.2f}%)"
@@ -178,7 +193,7 @@ def generate_report_text():
 
 # --- HANDLERS ---
 async def market_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching...")
+    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching accurate data...")
     await c.bot.edit_message_text(chat_id=u.effective_chat.id, message_id=msg.message_id, text=generate_report_text(), parse_mode=constants.ParseMode.MARKDOWN)
 
 async def auto_post(c: ContextTypes.DEFAULT_TYPE):
