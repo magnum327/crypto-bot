@@ -1,7 +1,7 @@
-python-telegram-bot[job-queue]
-requests
-flask
-yfinance
-tradingview-ta
+curl-cffi
 cloudscraper
+tradingview-ta
+yfinance
+python-telegram-bot
+
 
