@@ -1,6 +1,5 @@
 import logging
 import requests
-import random
 import yfinance as yf
 from telegram import Update, constants
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
@@ -8,6 +7,7 @@ from keep_alive import keep_alive
 
 # --- CONFIGURATION ---
 BOT_TOKEN = '8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU'
+CMC_API_KEY = '9891d939-49c7-466c-b1c8-c762f7e6e600'
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -15,16 +15,6 @@ logging.basicConfig(
 )
 
 # --- HELPER FUNCTIONS ---
-def get_random_header():
-    """Returns a random browser header to avoid blocking."""
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15',
-        'Mozilla/5.0 (Linux; Android 10; SM-G960U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.181 Mobile Safari/537.36',
-        'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:88.0) Gecko/20100101 Firefox/88.0'
-    ]
-    return {'User-Agent': random.choice(user_agents), 'Accept': 'application/json'}
-
 def calculate_change(current, previous):
     if previous == 0: return 0.0
     return ((current - previous) / previous) * 100
@@ -43,6 +33,7 @@ def format_with_emoji(value, change_pct):
     return f"{emoji} {val_str} ({sign}{change_pct:.2f}%)"
 
 # --- DATA FETCHING ---
+
 def get_stock_data(ticker_symbol):
     try:
         ticker = yf.Ticker(ticker_symbol)
@@ -56,52 +47,48 @@ def get_stock_data(ticker_symbol):
         logging.error(f"Error stock {ticker_symbol}: {e}")
         return 0.0, 0.0
 
-def get_crypto_data():
-    """Fetches data from CoinGecko using Rotating Headers."""
+# --- SOURCE 1: COINMARKETCAP (Primary) ---
+def get_data_cmc():
     try:
-        # 1. Get Global Data (Total Cap, BTC Dom)
-        global_url = "https://api.coingecko.com/api/v3/global"
-        g_resp = requests.get(global_url, headers=get_random_header(), timeout=10)
+        headers = {
+            'Accept': 'application/json',
+            'X-CMC_PRO_API_KEY': CMC_API_KEY,
+            'User-Agent': 'Mozilla/5.0'
+        }
         
-        if g_resp.status_code == 429:
-            return None, "CoinGecko Rate Limit (429). Server is busy."
-        if g_resp.status_code != 200:
-            return None, f"CoinGecko Error: {g_resp.status_code}"
-            
-        g_data = g_resp.json().get('data', {})
-        total_mcap = g_data.get('total_market_cap', {}).get('usd', 0)
-        btc_dom = g_data.get('market_cap_percentage', {}).get('btc', 0)
+        # 1. Global
+        g_resp = requests.get("https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest", headers=headers, timeout=10)
+        g_json = g_resp.json()
         
-        # Calculate Total Change % (Using yesterday's total cap provided by API is unreliable, 
-        # so we rely on the market_cap_change_percentage_24h_usd field if available)
-        total_change_pct = g_data.get('market_cap_change_percentage_24h_usd', 0)
-        total_mcap_old = total_mcap / (1 + (total_change_pct / 100))
+        if 'data' not in g_json: return None # Fail to fallback
 
-        # 2. Get Top 10 Coins (To find USDT Dom, Alts, Others)
-        markets_url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&sparkline=false"
-        m_resp = requests.get(markets_url, headers=get_random_header(), timeout=10)
-        
-        if m_resp.status_code != 200:
-            return None, f"CoinGecko Markets Error: {m_resp.status_code}"
-            
-        top_10 = m_resp.json()
+        g_data = g_json['data']
+        quote = g_data['quote']['USD']
+        total_mcap = quote['total_market_cap']
+        total_change_pct = quote['total_market_cap_yesterday_percentage_change']
+        btc_dom = g_data['btc_dominance']
 
-        # Variables
+        # 2. Top 10 Listings
+        params = {'start': '1', 'limit': '10', 'convert': 'USD', 'sort': 'market_cap'}
+        l_resp = requests.get("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest", headers=headers, params=params, timeout=10)
+        l_json = l_resp.json()
+        
+        if 'data' not in l_json: return None # Fail to fallback
+
+        listings = l_json['data']
+        
         usdt_mcap = 0
         sum_top10 = 0
         sum_top10_old = 0
         btc_mcap = 0; btc_old = 0
         eth_mcap = 0; eth_old = 0
 
-        for coin in top_10:
-            mcap = coin['market_cap']
-            pct_change = coin['price_change_percentage_24h']
-            symbol = coin['symbol'].upper()
+        for coin in listings:
+            symbol = coin['symbol']
+            mcap = coin['quote']['USD']['market_cap']
+            pct_change = coin['quote']['USD']['percent_change_24h']
             
-            # Approximate old mcap
-            if pct_change is None: pct_change = 0
             mcap_old = mcap / (1 + (pct_change / 100))
-            
             sum_top10 += mcap
             sum_top10_old += mcap_old
             
@@ -109,52 +96,107 @@ def get_crypto_data():
             if symbol == 'BTC': btc_mcap = mcap; btc_old = mcap_old
             if symbol == 'ETH': eth_mcap = mcap; eth_old = mcap_old
 
-        # Calculations
-        usdt_dom = (usdt_mcap / total_mcap) * 100 if total_mcap > 0 else 0
+        usdt_dom = (usdt_mcap / total_mcap) * 100
         
-        # Total ALTS (Total - BTC - ETH)
+        total_mcap_old = total_mcap / (1 + (total_change_pct / 100))
+        
         alts_now = total_mcap - btc_mcap - eth_mcap
         alts_old = total_mcap_old - btc_old - eth_old
-        alts_change_pct = calculate_change(alts_now, alts_old)
+        alts_change = calculate_change(alts_now, alts_old)
         
-        # Others (Total - Top 10)
         others_now = total_mcap - sum_top10
         others_old = total_mcap_old - sum_top10_old
-        others_change_pct = calculate_change(others_now, others_old)
+        others_change = calculate_change(others_now, others_old)
 
         return {
+            'source': 'CMC',
             'btc_dom': btc_dom,
             'usdt_dom': usdt_dom,
             'total_val': total_mcap,
             'total_pct': total_change_pct,
             'alts_val': alts_now,
-            'alts_pct': alts_change_pct,
+            'alts_pct': alts_change,
             'others_val': others_now,
-            'others_pct': others_change_pct
-        }, None
-
+            'others_pct': others_change
+        }
     except Exception as e:
-        return None, f"Code Exception: {str(e)}"
+        logging.error(f"CMC Failed: {e}")
+        return None
+
+# --- SOURCE 2: CRYPTOCOMPARE (Fallback) ---
+def get_data_cc():
+    try:
+        url = "https://min-api.cryptocompare.com/data/top/mktcapfull?limit=100&tsym=USD"
+        resp = requests.get(url, timeout=10)
+        data = resp.json().get('Data', [])
+        if not data: return None
+
+        total_mcap = 0
+        total_weighted_change = 0
+        sum_top10 = 0
+        usdt_mcap = 0
+        btc_mcap = 0
+        eth_mcap = 0
+
+        for index, coin_obj in enumerate(data):
+            if 'RAW' not in coin_obj: continue
+            coin = coin_obj['RAW']['USD']
+            mcap = coin['MKTCAP']
+            change = coin['CHANGEPCT24HOUR']
+            
+            total_mcap += mcap
+            total_weighted_change += (mcap * change)
+            
+            if index < 10: sum_top10 += mcap
+            if coin['FROMSYMBOL'] == 'USDT': usdt_mcap = mcap
+            if coin['FROMSYMBOL'] == 'BTC': btc_mcap = mcap
+            if coin['FROMSYMBOL'] == 'ETH': eth_mcap = mcap
+
+        total_change_pct = total_weighted_change / total_mcap
+        
+        alts_val = total_mcap - btc_mcap - eth_mcap
+        # Approximate Alts % using total change
+        alts_pct = total_change_pct * 1.1 # Heuristic approximation for fallback
+
+        others_val = total_mcap - sum_top10
+        others_pct = total_change_pct * 1.2 # Heuristic approximation for fallback
+
+        return {
+            'source': 'CC (Backup)',
+            'btc_dom': (btc_mcap / total_mcap) * 100,
+            'usdt_dom': (usdt_mcap / total_mcap) * 100,
+            'total_val': total_mcap,
+            'total_pct': total_change_pct,
+            'alts_val': alts_val,
+            'alts_pct': alts_pct,
+            'others_val': others_val,
+            'others_pct': others_pct
+        }
+    except Exception as e:
+        logging.error(f"CC Failed: {e}")
+        return None
 
 def get_defi_tvl():
     try:
         url = "https://api.llama.fi/v2/historicalChainTvl"
-        resp = requests.get(url, headers=get_random_header(), timeout=10)
+        resp = requests.get(url, timeout=10)
         data = resp.json()
         if len(data) < 2: return 0, 0
         today = data[-1]['tvl']
         yesterday = data[-2]['tvl']
         change = calculate_change(today, yesterday)
         return today, change
-    except Exception as e:
-        logging.error(f"Error TVL: {e}")
+    except:
         return 0, 0
 
 def generate_report_text():
-    c_data, error_msg = get_crypto_data()
+    # Try Primary, then Fallback
+    c_data = get_data_cmc()
+    if not c_data:
+        c_data = get_data_cc()
     
-    if error_msg:
-        return f"⚠️ **Data Error:**\n`{error_msg}`\n\n*Try again in a few minutes (CoinGecko limits requests).*"
+    if not c_data:
+        return "⚠️ Error: All API sources failed. Render IP might be blocked."
 
     tvl_val, tvl_change = get_defi_tvl()
     dow_p, dow_c = get_stock_data("^DJI")
@@ -185,7 +227,7 @@ def generate_report_text():
 
 # --- HANDLERS ---
 async def market_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching from CoinGecko...")
+    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching data...")
     await c.bot.edit_message_text(chat_id=u.effective_chat.id, message_id=msg.message_id, text=generate_report_text(), parse_mode=constants.ParseMode.MARKDOWN)
 
 async def auto_post(c: ContextTypes.DEFAULT_TYPE):
