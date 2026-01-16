@@ -14,19 +14,17 @@ logging.basicConfig(
 )
 
 # --- HELPER FUNCTIONS ---
-def calculate_change(current, previous):
-    if previous == 0: return 0.0
-    return ((current - previous) / previous) * 100
-
 def format_with_emoji(value, change_pct):
     emoji = "🟢" if change_pct >= 0 else "🔴"
     sign = "+" if change_pct >= 0 else ""
+    
     if value >= 1_000_000_000_000:
         val_str = f"${value / 1_000_000_000_000:.2f}T"
     elif value >= 1_000_000_000:
         val_str = f"${value / 1_000_000_000:.2f}B"
     else:
         val_str = f"${value:,.2f}"
+    
     return f"{emoji} {val_str} ({sign}{change_pct:.2f}%)"
 
 # --- DATA FETCHING ---
@@ -44,99 +42,88 @@ def get_stock_data(ticker_symbol):
         return 0.0, 0.0
 
 def get_crypto_data():
-    """Fetches data from CoinCap (No Key Required, Very Stable)."""
+    """Fetches data from CryptoCompare (Top 100 Sum Method)."""
     try:
-        # Fetch Top 100 Coins to calculate Global Metrics manually
-        # This bypasses the need for a 'Global' endpoint that usually gets blocked
-        url = "https://api.coincap.io/v2/assets?limit=100"
+        # Fetch Top 100 coins by Market Cap
+        url = "https://min-api.cryptocompare.com/data/top/mktcapfull?limit=100&tsym=USD"
         resp = requests.get(url, timeout=10)
         
         if resp.status_code != 200:
-            return None, f"CoinCap Error: {resp.status_code}"
+            return None, f"CryptoCompare Error: {resp.status_code}"
             
-        data = resp.json().get('data', [])
-        
+        data = resp.json().get('Data', [])
         if not data:
-            return None, "CoinCap returned empty data."
+            return None, "CryptoCompare returned empty data."
 
-        # Initialize Variables
-        total_mcap_now = 0
-        total_mcap_old = 0
+        # Variables for Totals
+        total_mcap = 0
+        total_mcap_weighted_change = 0  # To calculate global % change
+        
+        sum_top10 = 0
+        sum_top10_weighted_change = 0
         
         usdt_mcap = 0
         btc_mcap = 0
         eth_mcap = 0
-        
-        sum_top10_now = 0
-        sum_top10_old = 0
 
-        # Loop through Top 100 to build the Total Market Cap
-        for index, coin in enumerate(data):
-            # Parse numbers (CoinCap sends strings)
-            price_usd = float(coin['priceUsd'])
-            mcap = float(coin['marketCapUsd'])
-            change_24h = float(coin['changePercent24Hr'])
-            symbol = coin['symbol']
-            
-            # Calculate what the mcap was 24h ago
-            mcap_old = mcap / (1 + (change_24h / 100))
+        # Loop through Top 100
+        for index, coin_obj in enumerate(data):
+            # CryptoCompare nests data in 'RAW' -> 'USD'
+            if 'RAW' not in coin_obj or 'USD' not in coin_obj['RAW']:
+                continue
+                
+            coin = coin_obj['RAW']['USD']
+            symbol = coin.get('FROMSYMBOL')
+            mcap = coin.get('MKTCAP', 0)
+            change_24h = coin.get('CHANGEPCT24HOUR', 0)
             
             # Add to Totals
-            total_mcap_now += mcap
-            total_mcap_old += mcap_old
-            
-            # Handle Top 10 Specifics
+            total_mcap += mcap
+            # Weight the change by market cap to get an accurate "Total % Change"
+            total_mcap_weighted_change += (mcap * change_24h)
+
+            # Handle Top 10
             if index < 10:
-                sum_top10_now += mcap
-                sum_top10_old += mcap_old
+                sum_top10 += mcap
+                sum_top10_weighted_change += (mcap * change_24h)
             
-            # Handle Specific Coins
             if symbol == 'USDT': usdt_mcap = mcap
             if symbol == 'BTC': btc_mcap = mcap
             if symbol == 'ETH': eth_mcap = mcap
 
-        # --- Derived Calculations ---
+        # --- Calculate Derived Metrics ---
         
-        # 1. BTC Dominance
-        btc_dom = (btc_mcap / total_mcap_now) * 100
+        # 1. Global % Change (Weighted Average)
+        total_change_pct = total_mcap_weighted_change / total_mcap if total_mcap > 0 else 0
         
-        # 2. USDT Dominance
-        usdt_dom = (usdt_mcap / total_mcap_now) * 100
+        # 2. Dominance
+        btc_dom = (btc_mcap / total_mcap) * 100 if total_mcap > 0 else 0
+        usdt_dom = (usdt_mcap / total_mcap) * 100 if total_mcap > 0 else 0
         
-        # 3. Total Change %
-        total_change_pct = calculate_change(total_mcap_now, total_mcap_old)
+        # 3. Alts (Total - BTC - ETH)
+        alts_val = total_mcap - btc_mcap - eth_mcap
+        # Calculate Alts % Change (Total Weighted - BTC Weighted - ETH Weighted) / Alts Val
+        # We need to find BTC/ETH change again to do this accurately
+        btc_change = next((c['RAW']['USD']['CHANGEPCT24HOUR'] for c in data if c['RAW']['USD']['FROMSYMBOL'] == 'BTC'), 0)
+        eth_change = next((c['RAW']['USD']['CHANGEPCT24HOUR'] for c in data if c['RAW']['USD']['FROMSYMBOL'] == 'ETH'), 0)
         
-        # 4. Total ALTS (Total - BTC - ETH)
-        # Note: We use Top 100 Sum as 'Total', which is 95%+ of the real market
-        alts_now = total_mcap_now - btc_mcap - eth_mcap
-        # Estimate Alts Old (using total old - btc old is hard without specific old values, 
-        # so we approximate Alts Change using the weighted average of the rest)
-        # Simpler method: Sum of (Top 100 Old) - BTC_Old - ETH_Old
-        # We need BTC/ETH Old specific values which we calculated in loop but didn't save?
-        # Ah, we didn't save specific old values for BTC/ETH. Let's fix loop logic above briefly.
-        # Actually, let's keep it simple:
-        
-        # Re-Loop to find BTC/ETH Old specifically (It's fast)
-        btc_old = btc_mcap / (1 + (float(next(c['changePercent24Hr'] for c in data if c['symbol']=='BTC')) / 100))
-        eth_old = eth_mcap / (1 + (float(next(c['changePercent24Hr'] for c in data if c['symbol']=='ETH')) / 100))
+        alts_weighted_change = total_mcap_weighted_change - (btc_mcap * btc_change) - (eth_mcap * eth_change)
+        alts_change_pct = alts_weighted_change / alts_val if alts_val > 0 else 0
 
-        alts_old = total_mcap_old - btc_old - eth_old
-        alts_change = calculate_change(alts_now, alts_old)
-        
-        # 5. Others (Total - Top 10)
-        others_now = total_mcap_now - sum_top10_now
-        others_old = total_mcap_old - sum_top10_old
-        others_change = calculate_change(others_now, others_old)
+        # 4. Others (Total - Top 10)
+        others_val = total_mcap - sum_top10
+        others_weighted_change = total_mcap_weighted_change - sum_top10_weighted_change
+        others_change_pct = others_weighted_change / others_val if others_val > 0 else 0
 
         return {
             'btc_dom': btc_dom,
             'usdt_dom': usdt_dom,
-            'total_val': total_mcap_now,
+            'total_val': total_mcap,
             'total_pct': total_change_pct,
-            'alts_val': alts_now,
-            'alts_pct': alts_change,
-            'others_val': others_now,
-            'others_pct': others_change
+            'alts_val': alts_val,
+            'alts_pct': alts_change_pct,
+            'others_val': others_val,
+            'others_pct': others_change_pct
         }, None
 
     except Exception as e:
@@ -150,7 +137,8 @@ def get_defi_tvl():
         if len(data) < 2: return 0, 0
         today = data[-1]['tvl']
         yesterday = data[-2]['tvl']
-        change = calculate_change(today, yesterday)
+        if yesterday == 0: return 0.0, 0.0
+        change = ((today - yesterday) / yesterday) * 100
         return today, change
     except Exception as e:
         logging.error(f"Error TVL: {e}")
@@ -191,7 +179,7 @@ def generate_report_text():
 
 # --- HANDLERS ---
 async def market_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching from CoinCap (Unblockable)...")
+    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching from CryptoCompare...")
     await c.bot.edit_message_text(chat_id=u.effective_chat.id, message_id=msg.message_id, text=generate_report_text(), parse_mode=constants.ParseMode.MARKDOWN)
 
 async def auto_post(c: ContextTypes.DEFAULT_TYPE):
