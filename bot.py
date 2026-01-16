@@ -6,11 +6,8 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from keep_alive import keep_alive
 
 # --- CONFIGURATION ---
-# 1. TELEGRAM BOT TOKEN
 BOT_TOKEN = '8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU'
-
-# 2. COINMARKETCAP API KEY (Your new key)
-CMC_API_KEY = '9891d93949c7466cb1c8c762f7e6e600'
+CMC_API_KEY = '9891d939-49c7-466c-b1c8-c762f7e6e600'  # <--- FIXED KEY WITH DASHES
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -69,7 +66,7 @@ def get_crypto_data():
         
         # Check if the API Key worked
         if not g_data:
-            logging.error(f"CMC Error: {g_resp.json()}")
+            logging.error(f"CMC Error: {g_resp.text}")
             return None
         
         quote = g_data.get('quote', {}).get('USD', {})
@@ -88,8 +85,7 @@ def get_crypto_data():
         sum_top10 = 0
         btc_mcap = 0
         eth_mcap = 0
-
-        # Calculate 'Yesterday's' values to derive % change for Alts/Others
+        
         sum_top10_old = 0
         btc_old = 0
         eth_old = 0
@@ -114,7 +110,7 @@ def get_crypto_data():
         # USDT Dominance
         usdt_dom = (usdt_mcap / total_mcap) * 100 if total_mcap > 0 else 0
         
-        # Calculate Total Old (to derive Alts/Others change)
+        # Calculate Total Old
         total_mcap_old = total_mcap / (1 + (total_change_pct / 100))
         
         # Total ALTS (Total - BTC - ETH)
