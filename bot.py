@@ -7,7 +7,7 @@ from keep_alive import keep_alive
 
 # --- CONFIGURATION ---
 BOT_TOKEN = '8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU'
-CMC_API_KEY = '9891d939-49c7-466c-b1c8-c762f7e6e600' 
+CMC_API_KEY = '9891d939-49c7-466c-b1c8-c762f7e6e600'
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -48,9 +48,9 @@ def get_crypto_data():
     """Fetches accurate data from CoinMarketCap with DEBUGGING."""
     try:
         headers = {
-            'Accepts': 'application/json',
+            'Accept': 'application/json',  # Fixed header name
             'X-CMC_PRO_API_KEY': CMC_API_KEY,
-            'User-Agent': 'Mozilla/5.0' # Added User-Agent to avoid blocks
+            'User-Agent': 'Mozilla/5.0'
         }
 
         # 1. Global Metrics
@@ -59,10 +59,13 @@ def get_crypto_data():
         g_json = g_resp.json()
 
         # --- DEBUG CHECK 1 ---
-        # If there is no 'data', return the error message from CMC
+        # If the API key is wrong, CMC returns a 'status' object with an error_message
+        if 'status' in g_json and g_json['status']['error_code'] != 0:
+            error_msg = g_json['status']['error_message']
+            return None, f"CMC API Error: {error_msg}"
+
         if 'data' not in g_json:
-            error_msg = g_json.get('status', {}).get('error_message', 'Unknown Error')
-            return None, f"CMC Error: {error_msg}"
+             return None, f"CMC Unknown Error: {g_resp.text}"
 
         g_data = g_json['data']
         quote = g_data.get('quote', {}).get('USD', {})
@@ -77,10 +80,10 @@ def get_crypto_data():
         l_json = l_resp.json()
 
         # --- DEBUG CHECK 2 ---
-        if 'data' not in l_json:
-             error_msg = l_json.get('status', {}).get('error_message', 'Unknown Error')
+        if 'status' in l_json and l_json['status']['error_code'] != 0:
+             error_msg = l_json['status']['error_message']
              return None, f"CMC Listings Error: {error_msg}"
-             
+
         listings = l_json['data']
 
         # Process Top 10
