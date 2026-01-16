@@ -7,7 +7,7 @@ from keep_alive import keep_alive
 
 # --- CONFIGURATION ---
 BOT_TOKEN = '8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU'
-CMC_API_KEY = '9891d939-49c7-466c-b1c8-c762f7e6e600'  # <--- FIXED KEY WITH DASHES
+CMC_API_KEY = '9891d939-49c7-466c-b1c8-c762f7e6e600'  # <--- NEW KEY WITH DASHES
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -64,7 +64,7 @@ def get_crypto_data():
         g_resp = requests.get(global_url, headers=headers)
         g_data = g_resp.json().get('data', {})
         
-        # Check if the API Key worked
+        # Check for errors
         if not g_data:
             logging.error(f"CMC Error: {g_resp.text}")
             return None
