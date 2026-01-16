@@ -33,86 +33,62 @@ def format_with_emoji(value, change_pct=0, is_volume=False):
     return f"{emoji} {val_str} ({sign}{change_pct:.2f}%)"
 
 # ==========================================
-#        TRADINGVIEW DATA FETCHING
+#        DATA SOURCES
 # ==========================================
 
-def get_tv_data(symbol, screener="crypto", exchange="CRYPTOCAP"):
+def get_tv_data(symbol):
     """
-    Fetches data from TradingView using their public widget API.
+    Fetches Crypto Data from TradingView (Bypasses API blocks)
     """
     try:
         handler = TA_Handler(
             symbol=symbol,
-            screener=screener,
-            exchange=exchange,
+            screener="crypto",
+            exchange="CRYPTOCAP",
             interval=Interval.INTERVAL_1_DAY
         )
         analysis = handler.get_analysis()
         
-        # 'close' is the current value
-        # 'open' is the value at the start of the day (used to calc change)
-        current = analysis.indicators['close']
-        open_price = analysis.indicators['open']
-        
-        if open_price == 0: change = 0
-        else: change = ((current - open_price) / open_price) * 100
-        
-        # Volume is sometimes available in indicators
+        # Get Price and Candle Data
+        current = analysis.indicators.get('close')
+        open_price = analysis.indicators.get('open')
         volume = analysis.indicators.get('volume')
         
+        # Calculate daily change %
+        if open_price and open_price != 0:
+            change = ((current - open_price) / open_price) * 100
+        else:
+            change = 0
+            
         return current, change, volume
     except Exception as e:
         logging.error(f"TV Error {symbol}: {e}")
         return None, None, None
 
-def get_all_tradingview_data():
-    # 1. Total Market Cap (CRYPTOCAP:TOTAL)
-    total_val, total_pct, total_vol = get_tv_data("TOTAL", "crypto", "CRYPTOCAP")
+def get_crypto_data():
+    # 1. Total Market Cap (Symbol: TOTAL)
+    total_val, total_change, total_vol = get_tv_data("TOTAL")
     
-    # 2. BTC Dominance (CRYPTOCAP:BTC.D)
-    btc_dom, btc_change, _ = get_tv_data("BTC.D", "crypto", "CRYPTOCAP")
+    # 2. BTC Dominance (Symbol: BTC.D)
+    btc_dom, btc_change, _ = get_tv_data("BTC.D")
     
-    # 3. USDT Dominance (CRYPTOCAP:USDT.D)
-    usdt_dom, usdt_change, _ = get_tv_data("USDT.D", "crypto", "CRYPTOCAP")
+    # 3. USDT Dominance (Symbol: USDT.D)
+    usdt_dom, usdt_change, _ = get_tv_data("USDT.D")
     
-    # 4. ETH Dominance (CRYPTOCAP:ETH.D) - Used for Alts Calc
-    eth_dom, _, _ = get_tv_data("ETH.D", "crypto", "CRYPTOCAP")
-
-    # If Total Cap failed, the rest is useless
-    if total_val is None:
-        return None
+    # 4. ETH Dominance (For Alts Calculation)
+    eth_dom, _, _ = get_tv_data("ETH.D")
 
     return {
-        'source': 'TradingView',
         'total_cap': total_val,
-        'total_change': total_pct,
-        'total_vol': total_vol, # Note: TV volume for 'TOTAL' is often just unitless index, checking validity below
+        'total_change': total_change,
+        'total_vol': total_vol,
         'btc_dom': btc_dom,
         'usdt_dom': usdt_dom,
         'eth_dom': eth_dom
     }
 
-# --- TRADITIONAL MARKETS (Direct Yahoo Fallback) ---
-def get_stock_data(ticker):
-    try:
-        # Direct Request (Bypasses yfinance library blocks)
-        h = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
-        r = requests.get(url, headers=h, timeout=5)
-        d = r.json()['chart']['result'][0]
-        close = d['indicators']['quote'][0]['close']
-        
-        # Get last valid non-null price
-        curr = next((x for x in reversed(close) if x is not None), 0)
-        prev = next((x for x in reversed(close[:-1]) if x is not None), 0)
-        
-        change = ((curr - prev)/prev)*100
-        return curr, change, "Yahoo"
-    except:
-        return None, None, "Failed"
-
-# --- DEFILLAMA (TVL ONLY) ---
 def get_tvl_data():
+    # DeFiLlama (TVL) - Usually safe from blocks
     try:
         r = requests.get("https://api.llama.fi/v2/historicalChainTvl", timeout=10)
         d = r.json()
@@ -123,54 +99,87 @@ def get_tvl_data():
     except:
         return None, None, "Error"
 
+def get_stock_data(ticker):
+    # Direct Yahoo API (Bypasses yfinance library blocks)
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
+        r = requests.get(url, headers=headers, timeout=5)
+        data = r.json()['chart']['result'][0]
+        
+        # Extract closing prices
+        quotes = data['indicators']['quote'][0]['close']
+        # Filter out Nones (common in Yahoo data)
+        valid_quotes = [q for q in quotes if q is not None]
+        
+        if len(valid_quotes) < 2: return None, None, "NoData"
+        
+        curr = valid_quotes[-1]
+        prev = valid_quotes[-2]
+        change = ((curr - prev)/prev)*100
+        
+        return curr, change, "Yahoo(API)"
+    except:
+        return None, None, "Failed"
+
 # --- REPORT GENERATOR ---
 def generate_report():
-    # 1. Fetch Crypto (TradingView)
-    c = get_all_tradingview_data()
-    
-    # 2. Fetch TVL
+    c = get_crypto_data()
     tvl_val, tvl_pct, tvl_src = get_tvl_data()
-    
-    # 3. Fetch Stocks
     sp_val, sp_pct, sp_src = get_stock_data("^GSPC")
     ndq_val, ndq_pct, ndq_src = get_stock_data("^IXIC")
 
-    # --- FORMATTING ---
     output = "📊 **MARKET SNAPSHOT**\n\n"
     
-    if c:
-        # Crypto Section
-        output += "**Crypto Market Cap:**\n"
+    # --- CRYPTO SECTION ---
+    output += "**Crypto Market Cap:**\n"
+    
+    if c['total_cap']:
         output += f"🌍 Total: {format_with_emoji(c['total_cap'], c['total_change'])} (Src: TradingView)\n"
         
-        # Volume logic: TradingView 'TOTAL' volume is sometimes just an index number, 
-        # but often valid. If it's too small, we hide it.
-        if c['total_vol'] and c['total_vol'] > 1_000_000:
-             output += f"📊 Vol: ${c['total_vol']/1_000_000_000:.2f}B (Src: TradingView)\n"
-        
-        # Alts Calc
-        if c['total_cap'] and c['btc_dom'] and c['eth_dom']:
+        # Volume Check
+        if c['total_vol'] and c['total_vol'] > 0:
+             # TradingView volume for 'TOTAL' is often an index, let's verify magnitude
+             # If > 1 Billion, assumes standard USD volume
+             if c['total_vol'] > 1_000_000_000:
+                 output += f"📊 Vol: ${c['total_vol']/1_000_000_000:.2f}B (Src: TradingView)\n"
+             else:
+                 output += f"📊 Vol: {c['total_vol']:,.0f} (Src: TradingView)\n"
+        else:
+             output += f"📊 Vol: N/A\n"
+             
+        # Alts Calculation
+        if c['btc_dom'] and c['eth_dom']:
             alts_val = c['total_cap'] * (1 - (c['btc_dom']/100) - (c['eth_dom']/100))
             output += f"🔵 Total ALTS: {format_with_emoji(alts_val, c['total_change'])} (Calc)\n"
-        
-        # TVL
-        if tvl_val:
-            output += f"🔒 TVL: {format_with_emoji(tvl_val, tvl_pct)} (Src: {tvl_src})\n"
+    else:
+        output += "🌍 Total: ⚠️ Error (TradingView Blocked)\n"
+        output += "🔵 Total ALTS: ⚠️ Waiting for Data\n"
 
-        output += "\n**Crypto Dominance:**\n"
+    # TVL
+    if tvl_val:
+        output += f"🔒 TVL: {format_with_emoji(tvl_val, tvl_pct)} (Src: {tvl_src})\n"
+    else:
+        output += f"🔒 TVL: ⚠️ Error\n"
+
+    output += "\n**Crypto Dominance:**\n"
+    if c['btc_dom']:
         output += f"🟠 BTC: `{c['btc_dom']:.2f}%` (Src: TradingView)\n"
         output += f"🟢 USDT: `{c['usdt_dom']:.2f}%` (Src: TradingView)\n\n"
-    
     else:
-        output += "⚠️ **Error:** TradingView data unavailable.\n\n"
+        output += "🟠 BTC: ⚠️ Error\n🟢 USDT: ⚠️ Error\n\n"
 
-    # Traditional Section
+    # --- TRADITIONAL SECTION ---
     output += "**Traditional Markets:**\n"
-    if sp_val: output += f"{format_with_emoji(sp_val, sp_pct).split(' (')[0] + f' ({sp_pct:+.2f}%)'} S&P 500 (Src: {sp_src})\n"
-    else: output += "⚠️ S&P 500: Failed to Fetch\n"
+    if sp_val: 
+        output += f"{format_with_emoji(sp_val, sp_pct).split(' (')[0] + f' ({sp_pct:+.2f}%)'} S&P 500 (Src: {sp_src})\n"
+    else: 
+        output += "⚠️ S&P 500: Failed to Fetch\n"
 
-    if ndq_val: output += f"{format_with_emoji(ndq_val, ndq_pct).split(' (')[0] + f' ({ndq_pct:+.2f}%)'} NASDAQ (Src: {ndq_src})"
-    else: output += "⚠️ NASDAQ: Failed to Fetch"
+    if ndq_val: 
+        output += f"{format_with_emoji(ndq_val, ndq_pct).split(' (')[0] + f' ({ndq_pct:+.2f}%)'} NASDAQ (Src: {ndq_src})"
+    else: 
+        output += "⚠️ NASDAQ: Failed to Fetch"
 
     return output
 
