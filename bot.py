@@ -1,5 +1,6 @@
 import logging
 import requests
+import random
 import yfinance as yf
 from telegram import Update, constants
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
@@ -14,6 +15,20 @@ logging.basicConfig(
 )
 
 # --- HELPER FUNCTIONS ---
+def get_random_header():
+    """Returns a random browser header to avoid blocking."""
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15',
+        'Mozilla/5.0 (Linux; Android 10; SM-G960U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.181 Mobile Safari/537.36',
+        'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:88.0) Gecko/20100101 Firefox/88.0'
+    ]
+    return {'User-Agent': random.choice(user_agents), 'Accept': 'application/json'}
+
+def calculate_change(current, previous):
+    if previous == 0: return 0.0
+    return ((current - previous) / previous) * 100
+
 def format_with_emoji(value, change_pct):
     emoji = "🟢" if change_pct >= 0 else "🔴"
     sign = "+" if change_pct >= 0 else ""
@@ -42,87 +57,79 @@ def get_stock_data(ticker_symbol):
         return 0.0, 0.0
 
 def get_crypto_data():
-    """Fetches data from CryptoCompare (Top 100 Sum Method)."""
+    """Fetches data from CoinGecko using Rotating Headers."""
     try:
-        # Fetch Top 100 coins by Market Cap
-        url = "https://min-api.cryptocompare.com/data/top/mktcapfull?limit=100&tsym=USD"
-        resp = requests.get(url, timeout=10)
+        # 1. Get Global Data (Total Cap, BTC Dom)
+        global_url = "https://api.coingecko.com/api/v3/global"
+        g_resp = requests.get(global_url, headers=get_random_header(), timeout=10)
         
-        if resp.status_code != 200:
-            return None, f"CryptoCompare Error: {resp.status_code}"
+        if g_resp.status_code == 429:
+            return None, "CoinGecko Rate Limit (429). Server is busy."
+        if g_resp.status_code != 200:
+            return None, f"CoinGecko Error: {g_resp.status_code}"
             
-        data = resp.json().get('Data', [])
-        if not data:
-            return None, "CryptoCompare returned empty data."
+        g_data = g_resp.json().get('data', {})
+        total_mcap = g_data.get('total_market_cap', {}).get('usd', 0)
+        btc_dom = g_data.get('market_cap_percentage', {}).get('btc', 0)
+        
+        # Calculate Total Change % (Using yesterday's total cap provided by API is unreliable, 
+        # so we rely on the market_cap_change_percentage_24h_usd field if available)
+        total_change_pct = g_data.get('market_cap_change_percentage_24h_usd', 0)
+        total_mcap_old = total_mcap / (1 + (total_change_pct / 100))
 
-        # Variables for Totals
-        total_mcap = 0
-        total_mcap_weighted_change = 0  # To calculate global % change
+        # 2. Get Top 10 Coins (To find USDT Dom, Alts, Others)
+        markets_url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&sparkline=false"
+        m_resp = requests.get(markets_url, headers=get_random_header(), timeout=10)
         
-        sum_top10 = 0
-        sum_top10_weighted_change = 0
-        
+        if m_resp.status_code != 200:
+            return None, f"CoinGecko Markets Error: {m_resp.status_code}"
+            
+        top_10 = m_resp.json()
+
+        # Variables
         usdt_mcap = 0
-        btc_mcap = 0
-        eth_mcap = 0
+        sum_top10 = 0
+        sum_top10_old = 0
+        btc_mcap = 0; btc_old = 0
+        eth_mcap = 0; eth_old = 0
 
-        # Loop through Top 100
-        for index, coin_obj in enumerate(data):
-            # CryptoCompare nests data in 'RAW' -> 'USD'
-            if 'RAW' not in coin_obj or 'USD' not in coin_obj['RAW']:
-                continue
-                
-            coin = coin_obj['RAW']['USD']
-            symbol = coin.get('FROMSYMBOL')
-            mcap = coin.get('MKTCAP', 0)
-            change_24h = coin.get('CHANGEPCT24HOUR', 0)
+        for coin in top_10:
+            mcap = coin['market_cap']
+            pct_change = coin['price_change_percentage_24h']
+            symbol = coin['symbol'].upper()
             
-            # Add to Totals
-            total_mcap += mcap
-            # Weight the change by market cap to get an accurate "Total % Change"
-            total_mcap_weighted_change += (mcap * change_24h)
-
-            # Handle Top 10
-            if index < 10:
-                sum_top10 += mcap
-                sum_top10_weighted_change += (mcap * change_24h)
+            # Approximate old mcap
+            if pct_change is None: pct_change = 0
+            mcap_old = mcap / (1 + (pct_change / 100))
+            
+            sum_top10 += mcap
+            sum_top10_old += mcap_old
             
             if symbol == 'USDT': usdt_mcap = mcap
-            if symbol == 'BTC': btc_mcap = mcap
-            if symbol == 'ETH': eth_mcap = mcap
+            if symbol == 'BTC': btc_mcap = mcap; btc_old = mcap_old
+            if symbol == 'ETH': eth_mcap = mcap; eth_old = mcap_old
 
-        # --- Calculate Derived Metrics ---
-        
-        # 1. Global % Change (Weighted Average)
-        total_change_pct = total_mcap_weighted_change / total_mcap if total_mcap > 0 else 0
-        
-        # 2. Dominance
-        btc_dom = (btc_mcap / total_mcap) * 100 if total_mcap > 0 else 0
+        # Calculations
         usdt_dom = (usdt_mcap / total_mcap) * 100 if total_mcap > 0 else 0
         
-        # 3. Alts (Total - BTC - ETH)
-        alts_val = total_mcap - btc_mcap - eth_mcap
-        # Calculate Alts % Change (Total Weighted - BTC Weighted - ETH Weighted) / Alts Val
-        # We need to find BTC/ETH change again to do this accurately
-        btc_change = next((c['RAW']['USD']['CHANGEPCT24HOUR'] for c in data if c['RAW']['USD']['FROMSYMBOL'] == 'BTC'), 0)
-        eth_change = next((c['RAW']['USD']['CHANGEPCT24HOUR'] for c in data if c['RAW']['USD']['FROMSYMBOL'] == 'ETH'), 0)
+        # Total ALTS (Total - BTC - ETH)
+        alts_now = total_mcap - btc_mcap - eth_mcap
+        alts_old = total_mcap_old - btc_old - eth_old
+        alts_change_pct = calculate_change(alts_now, alts_old)
         
-        alts_weighted_change = total_mcap_weighted_change - (btc_mcap * btc_change) - (eth_mcap * eth_change)
-        alts_change_pct = alts_weighted_change / alts_val if alts_val > 0 else 0
-
-        # 4. Others (Total - Top 10)
-        others_val = total_mcap - sum_top10
-        others_weighted_change = total_mcap_weighted_change - sum_top10_weighted_change
-        others_change_pct = others_weighted_change / others_val if others_val > 0 else 0
+        # Others (Total - Top 10)
+        others_now = total_mcap - sum_top10
+        others_old = total_mcap_old - sum_top10_old
+        others_change_pct = calculate_change(others_now, others_old)
 
         return {
             'btc_dom': btc_dom,
             'usdt_dom': usdt_dom,
             'total_val': total_mcap,
             'total_pct': total_change_pct,
-            'alts_val': alts_val,
+            'alts_val': alts_now,
             'alts_pct': alts_change_pct,
-            'others_val': others_val,
+            'others_val': others_now,
             'others_pct': others_change_pct
         }, None
 
@@ -132,13 +139,12 @@ def get_crypto_data():
 def get_defi_tvl():
     try:
         url = "https://api.llama.fi/v2/historicalChainTvl"
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, headers=get_random_header(), timeout=10)
         data = resp.json()
         if len(data) < 2: return 0, 0
         today = data[-1]['tvl']
         yesterday = data[-2]['tvl']
-        if yesterday == 0: return 0.0, 0.0
-        change = ((today - yesterday) / yesterday) * 100
+        change = calculate_change(today, yesterday)
         return today, change
     except Exception as e:
         logging.error(f"Error TVL: {e}")
@@ -148,7 +154,7 @@ def generate_report_text():
     c_data, error_msg = get_crypto_data()
     
     if error_msg:
-        return f"⚠️ **Data Error:**\n`{error_msg}`"
+        return f"⚠️ **Data Error:**\n`{error_msg}`\n\n*Try again in a few minutes (CoinGecko limits requests).*"
 
     tvl_val, tvl_change = get_defi_tvl()
     dow_p, dow_c = get_stock_data("^DJI")
@@ -179,7 +185,7 @@ def generate_report_text():
 
 # --- HANDLERS ---
 async def market_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching from CryptoCompare...")
+    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching from CoinGecko...")
     await c.bot.edit_message_text(chat_id=u.effective_chat.id, message_id=msg.message_id, text=generate_report_text(), parse_mode=constants.ParseMode.MARKDOWN)
 
 async def auto_post(c: ContextTypes.DEFAULT_TYPE):
