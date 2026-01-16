@@ -13,18 +13,13 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- HEADERS TO MIMIC A REAL BROWSER ---
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept': 'application/json'
-}
-
 # --- DATA FETCHING FUNCTIONS ---
 
 def get_stock_data(ticker_symbol):
     """Fetches price and daily % change using Yahoo Finance."""
     try:
         ticker = yf.Ticker(ticker_symbol)
+        # Get 2 days of data to calculate change
         history = ticker.history(period="2d")
         
         if len(history) < 2:
@@ -40,47 +35,51 @@ def get_stock_data(ticker_symbol):
         return 0.0, 0.0
 
 def get_crypto_data():
-    """Fetches global crypto metrics and Top 10 data from CoinGecko."""
+    """Fetches crypto data using CoinPaprika (Global) and CoinCap (Top 10)."""
     try:
-        # 1. Get Global Data
-        global_url = "https://api.coingecko.com/api/v3/global"
-        global_resp = requests.get(global_url, headers=HEADERS, timeout=10)
-        global_data = global_resp.json().get('data')
+        # 1. Get Global Data from CoinPaprika (More reliable for Total Cap)
+        global_url = "https://api.coinpaprika.com/v1/global"
+        global_resp = requests.get(global_url, timeout=10)
+        global_data = global_resp.json()
         
-        if not global_data:
-            return None
+        # 2. Get Top 10 Assets from CoinCap (Fast & Free)
+        assets_url = "https://api.coincap.io/v2/assets?limit=10"
+        assets_resp = requests.get(assets_url, timeout=10)
+        assets_data = assets_resp.json().get('data', [])
 
-        # 2. Get Top 10 Coins (to calculate OTHERS)
-        # We fetch the top 10 coins by market cap to sum them up
-        markets_url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1"
-        markets_resp = requests.get(markets_url, headers=HEADERS, timeout=10)
-        top_10_data = markets_resp.json()
-
-        # Metrics
-        btc_dom = global_data['market_cap_percentage'].get('btc', 0)
-        usdt_dom = global_data['market_cap_percentage'].get('usdt', 0)
-        total_mcap = global_data['total_market_cap'].get('usd', 0)
+        # --- Parse Global Metrics ---
+        total_mcap = global_data.get('market_cap_usd', 0)
+        btc_dom = global_data.get('bitcoin_dominance_percentage', 0)
         
-        # Calculate TOTAL3 (Total - BTC - ETH)
-        btc_mcap = total_mcap * (btc_dom / 100)
-        eth_dom = global_data['market_cap_percentage'].get('eth', 0)
-        eth_mcap = total_mcap * (eth_dom / 100)
+        # --- Parse Top 10 to find USDT Dom and OTHERS ---
+        top_10_mcap_sum = 0
+        usdt_mcap = 0
+        
+        for coin in assets_data:
+            mcap = float(coin.get('marketCapUsd', 0))
+            top_10_mcap_sum += mcap
+            
+            if coin.get('symbol') == 'USDT':
+                usdt_mcap = mcap
+        
+        # Calculate USDT Dominance
+        usdt_dom = (usdt_mcap / total_mcap) * 100 if total_mcap > 0 else 0
+        
+        # Calculate OTHERS (Total - Top 10)
+        others_mcap = total_mcap - top_10_mcap_sum
+        
+        # Calculate TOTAL3 (Approximate: Total - BTC MCap - ETH MCap)
+        # We can get BTC/ETH mcap from the assets_data list
+        btc_mcap = next((float(c['marketCapUsd']) for c in assets_data if c['symbol'] == 'BTC'), 0)
+        eth_mcap = next((float(c['marketCapUsd']) for c in assets_data if c['symbol'] == 'ETH'), 0)
         total3_mcap = total_mcap - btc_mcap - eth_mcap
 
-        # Calculate OTHERS (Total - Top 10)
-        top_10_sum = 0
-        if isinstance(top_10_data, list):
-            for coin in top_10_data:
-                top_10_sum += coin.get('market_cap', 0)
-        
-        others_mcap = total_mcap - top_10_sum
-        
         return {
             'btc_dom': btc_dom,
             'usdt_dom': usdt_dom,
             'total_mcap': total_mcap,
-            'total3_mcap': total3_mcap, # Alts (No BTC/ETH)
-            'others_mcap': others_mcap  # Others (No Top 10)
+            'total3_mcap': total3_mcap,
+            'others_mcap': others_mcap
         }
     except Exception as e:
         logging.error(f"Error fetching crypto data: {e}")
@@ -90,7 +89,7 @@ def get_defi_tvl():
     """Fetches Total Value Locked (TVL) from DeFiLlama."""
     try:
         url = "https://api.llama.fi/v2/historicalChainTvl"
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        response = requests.get(url, timeout=10)
         data = response.json()
         
         if not data:
@@ -114,12 +113,16 @@ def generate_report_text():
     crypto_data = get_crypto_data()
     defi_tvl = get_defi_tvl()
     
+    # Stock Tickers: ^DJI (Dow), ^GSPC (S&P), ^IXIC (Nasdaq)
+    dow_price, dow_change = get_stock_data("^DJI")
     sp500_price, sp500_change = get_stock_data("^GSPC")
     nasdaq_price, nasdaq_change = get_stock_data("^IXIC")
 
     if not crypto_data:
         return "⚠️ Error: Could not fetch crypto data. (Check logs)"
 
+    # Emojis
+    dow_emoji = "🟢" if dow_change >= 0 else "🔴"
     sp500_emoji = "🟢" if sp500_change >= 0 else "🔴"
     nasdaq_emoji = "🟢" if nasdaq_change >= 0 else "🔴"
 
@@ -136,6 +139,7 @@ def generate_report_text():
         f"🔒 DeFi TVL: `{format_number(defi_tvl)}`\n\n"
         
         f"**Traditional Markets:**\n"
+        f"{dow_emoji} Dow Jones: `{dow_price:,.0f}` ({dow_change:+.2f}%)\n"
         f"{sp500_emoji} S&P 500: `{sp500_price:,.0f}` ({sp500_change:+.2f}%)\n"
         f"{nasdaq_emoji} NASDAQ: `{nasdaq_price:,.0f}` ({nasdaq_change:+.2f}%)"
     )
