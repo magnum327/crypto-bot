@@ -6,13 +6,18 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from keep_alive import keep_alive
 
 # --- CONFIGURATION ---
-# REPLACE THIS WITH YOUR ACTUAL TOKEN IF IT'S NOT ALREADY HERE
 BOT_TOKEN = '8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU'
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+# --- HEADERS TO MIMIC A REAL BROWSER ---
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'application/json'
+}
 
 # --- DATA FETCHING FUNCTIONS ---
 
@@ -38,7 +43,13 @@ def get_crypto_data():
     """Fetches global crypto metrics from CoinGecko."""
     try:
         url = "https://api.coingecko.com/api/v3/global"
-        response = requests.get(url, timeout=10)
+        # We pass the HEADERS here to avoid being blocked
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        
+        if response.status_code != 200:
+            logging.error(f"CoinGecko Blocked/Error: Status {response.status_code}")
+            return None
+            
         data = response.json().get('data')
         
         if not data:
@@ -64,15 +75,13 @@ def get_crypto_data():
 def get_defi_tvl():
     """Fetches Total Value Locked (TVL) from DeFiLlama."""
     try:
-        # Returns a list of historical TVL data points
         url = "https://api.llama.fi/v2/historicalChainTvl"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         data = response.json()
         
         if not data:
             return 0
             
-        # Get the very last item in the list (most recent data)
         latest_tvl = data[-1]['tvl']
         return latest_tvl
     except Exception as e:
@@ -89,13 +98,13 @@ def format_number(num):
 
 def generate_report_text():
     crypto_data = get_crypto_data()
-    defi_tvl = get_defi_tvl()  # <--- NEW CALL
+    defi_tvl = get_defi_tvl()
     
     sp500_price, sp500_change = get_stock_data("^GSPC")
     nasdaq_price, nasdaq_change = get_stock_data("^IXIC")
 
     if not crypto_data:
-        return "⚠️ Error: Could not fetch crypto data."
+        return "⚠️ Error: Could not fetch crypto data. (Check logs for code)"
 
     sp500_emoji = "🟢" if sp500_change >= 0 else "🔴"
     nasdaq_emoji = "🟢" if nasdaq_change >= 0 else "🔴"
@@ -109,7 +118,7 @@ def generate_report_text():
         f"**Crypto Market Cap:**\n"
         f"🌍 Total: `{format_number(crypto_data['total_mcap'])}`\n"
         f"🔵 Alts (Excl. BTC): `{format_number(crypto_data['alt_mcap'])}`\n"
-        f"🔒 DeFi TVL: `{format_number(defi_tvl)}`\n\n"  # <--- NEW LINE
+        f"🔒 DeFi TVL: `{format_number(defi_tvl)}`\n\n"
         
         f"**Traditional Markets:**\n"
         f"{sp500_emoji} S&P 500: `{sp500_price:,.0f}` ({sp500_change:+.2f}%)\n"
