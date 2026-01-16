@@ -40,33 +40,47 @@ def get_stock_data(ticker_symbol):
         return 0.0, 0.0
 
 def get_crypto_data():
-    """Fetches global crypto metrics from CoinGecko."""
+    """Fetches global crypto metrics and Top 10 data from CoinGecko."""
     try:
-        url = "https://api.coingecko.com/api/v3/global"
-        # We pass the HEADERS here to avoid being blocked
-        response = requests.get(url, headers=HEADERS, timeout=10)
+        # 1. Get Global Data
+        global_url = "https://api.coingecko.com/api/v3/global"
+        global_resp = requests.get(global_url, headers=HEADERS, timeout=10)
+        global_data = global_resp.json().get('data')
         
-        if response.status_code != 200:
-            logging.error(f"CoinGecko Blocked/Error: Status {response.status_code}")
-            return None
-            
-        data = response.json().get('data')
-        
-        if not data:
+        if not global_data:
             return None
 
-        btc_dom = data['market_cap_percentage'].get('btc', 0)
-        usdt_dom = data['market_cap_percentage'].get('usdt', 0)
-        total_mcap = data['total_market_cap'].get('usd', 0)
+        # 2. Get Top 10 Coins (to calculate OTHERS)
+        # We fetch the top 10 coins by market cap to sum them up
+        markets_url = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1"
+        markets_resp = requests.get(markets_url, headers=HEADERS, timeout=10)
+        top_10_data = markets_resp.json()
+
+        # Metrics
+        btc_dom = global_data['market_cap_percentage'].get('btc', 0)
+        usdt_dom = global_data['market_cap_percentage'].get('usdt', 0)
+        total_mcap = global_data['total_market_cap'].get('usd', 0)
         
+        # Calculate TOTAL3 (Total - BTC - ETH)
         btc_mcap = total_mcap * (btc_dom / 100)
-        alt_mcap = total_mcap - btc_mcap
+        eth_dom = global_data['market_cap_percentage'].get('eth', 0)
+        eth_mcap = total_mcap * (eth_dom / 100)
+        total3_mcap = total_mcap - btc_mcap - eth_mcap
+
+        # Calculate OTHERS (Total - Top 10)
+        top_10_sum = 0
+        if isinstance(top_10_data, list):
+            for coin in top_10_data:
+                top_10_sum += coin.get('market_cap', 0)
+        
+        others_mcap = total_mcap - top_10_sum
         
         return {
             'btc_dom': btc_dom,
             'usdt_dom': usdt_dom,
             'total_mcap': total_mcap,
-            'alt_mcap': alt_mcap
+            'total3_mcap': total3_mcap, # Alts (No BTC/ETH)
+            'others_mcap': others_mcap  # Others (No Top 10)
         }
     except Exception as e:
         logging.error(f"Error fetching crypto data: {e}")
@@ -104,7 +118,7 @@ def generate_report_text():
     nasdaq_price, nasdaq_change = get_stock_data("^IXIC")
 
     if not crypto_data:
-        return "⚠️ Error: Could not fetch crypto data. (Check logs for code)"
+        return "⚠️ Error: Could not fetch crypto data. (Check logs)"
 
     sp500_emoji = "🟢" if sp500_change >= 0 else "🔴"
     nasdaq_emoji = "🟢" if nasdaq_change >= 0 else "🔴"
@@ -117,7 +131,8 @@ def generate_report_text():
         
         f"**Crypto Market Cap:**\n"
         f"🌍 Total: `{format_number(crypto_data['total_mcap'])}`\n"
-        f"🔵 Alts (Excl. BTC): `{format_number(crypto_data['alt_mcap'])}`\n"
+        f"🔵 TOTAL3 (Alts): `{format_number(crypto_data['total3_mcap'])}`\n"
+        f"🟣 OTHERS (No Top 10): `{format_number(crypto_data['others_mcap'])}`\n"
         f"🔒 DeFi TVL: `{format_number(defi_tvl)}`\n\n"
         
         f"**Traditional Markets:**\n"
