@@ -40,7 +40,7 @@ def format_with_emoji(value, change_pct):
     return f"{emoji} {val_str} ({sign}{change_pct:.2f}%)"
 
 # ==========================================
-#        DATA SOURCE LAYER CAKE (6 LAYERS)
+#        DATA SOURCE LAYER CAKE (8 LAYERS)
 # ==========================================
 
 # --- 1. COINMARKETCAP ---
@@ -55,27 +55,22 @@ def get_data_cmc():
         total_mcap = quote['total_market_cap']
         total_change = quote['total_market_cap_yesterday_percentage_change']
         btc_dom = g_data['btc_dominance']
-
-        # Listings
+        
+        # Listings for Alts
         params = {'start': '1', 'limit': '10', 'convert': 'USD', 'sort': 'market_cap'}
         l_resp = requests.get("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest", headers=headers, params=params, timeout=5)
         listings = l_resp.json().get('data', [])
         
-        usdt_mcap = 0; btc_mcap = 0; eth_mcap = 0; sum_top10 = 0; sum_top10_old = 0
+        usdt_mcap = 0; btc_mcap = 0; eth_mcap = 0; sum_top10 = 0
         for coin in listings:
             mcap = coin['quote']['USD']['market_cap']
-            change = coin['quote']['USD']['percent_change_24h']
-            mcap_old = mcap / (1 + (change / 100))
             sum_top10 += mcap
-            sum_top10_old += mcap_old
             if coin['symbol'] == 'USDT': usdt_mcap = mcap
             if coin['symbol'] == 'BTC': btc_mcap = mcap
             if coin['symbol'] == 'ETH': eth_mcap = mcap
 
-        total_old = total_mcap / (1 + (total_change / 100))
         alts_now = total_mcap - btc_mcap - eth_mcap
         others_now = total_mcap - sum_top10
-        others_change = calculate_change(others_now, total_old - sum_top10_old)
 
         return {
             'source': 'CoinMarketCap',
@@ -84,13 +79,11 @@ def get_data_cmc():
             'total_val': total_mcap,
             'total_pct': total_change,
             'alts_val': alts_now,
-            'alts_pct': total_change * 1.05, 
+            'alts_pct': total_change * 1.05,
             'others_val': others_now,
-            'others_pct': others_change
+            'others_pct': total_change
         }
-    except Exception as e:
-        logging.error(f"CMC Failed: {e}")
-        return None
+    except: return None
 
 # --- 2. COINPAPRIKA ---
 def get_data_paprika():
@@ -120,13 +113,11 @@ def get_data_paprika():
             'total_val': total_mcap,
             'total_pct': total_change,
             'alts_val': total_mcap - btc_mcap - eth_mcap,
-            'alts_pct': total_change * 1.1,
+            'alts_pct': total_change,
             'others_val': total_mcap - sum_top10,
-            'others_pct': total_change * 1.1
+            'others_pct': total_change
         }
-    except Exception as e:
-        logging.error(f"Paprika Failed: {e}")
-        return None
+    except: return None
 
 # --- 3. CRYPTOCOMPARE ---
 def get_data_cc():
@@ -159,13 +150,11 @@ def get_data_cc():
             'total_val': total_mcap,
             'total_pct': total_pct,
             'alts_val': total_mcap - btc_mcap - eth_mcap,
-            'alts_pct': total_pct * 1.1,
+            'alts_pct': total_pct,
             'others_val': total_mcap - sum_top10,
-            'others_pct': total_pct * 1.2
+            'others_pct': total_pct
         }
-    except Exception as e:
-        logging.error(f"CryptoCompare Failed: {e}")
-        return None
+    except: return None
 
 # --- 4. COINGECKO ---
 def get_data_coingecko():
@@ -181,14 +170,12 @@ def get_data_coingecko():
             'usdt_dom': data['market_cap_percentage']['usdt'],
             'total_val': total_mcap,
             'total_pct': data.get('market_cap_change_percentage_24h_usd', 0),
-            'alts_val': total_mcap * 0.4, # Approx fallback
+            'alts_val': total_mcap * 0.4, # Approx
             'alts_pct': 0,
             'others_val': total_mcap * 0.15,
             'others_pct': 0
         }
-    except Exception as e:
-        logging.error(f"Gecko Failed: {e}")
-        return None
+    except: return None
 
 # --- 5. COINCAP ---
 def get_data_coincap():
@@ -211,51 +198,100 @@ def get_data_coincap():
             'btc_dom': (btc / total) * 100,
             'usdt_dom': (usdt / total) * 100,
             'total_val': total,
-            'total_pct': 0, # Cap doesn't give global change easily
+            'total_pct': 0,
             'alts_val': total - btc - eth,
             'alts_pct': 0,
             'others_val': total - sum_10,
             'others_pct': 0
         }
-    except Exception as e:
-        logging.error(f"CoinCap Failed: {e}")
-        return None
+    except: return None
 
-# --- 6. COINLORE ---
-def get_data_coinlore():
+# --- 6. COINCODEX (NEW) ---
+def get_data_coincodex():
     try:
-        resp = requests.get("https://api.coinlore.net/api/global/", headers=get_random_header(), timeout=5)
-        data = resp.json()[0]
-        total = float(data['total_mcap'])
+        resp = requests.get("https://coincodex.com/api/coincodex/get_global_metrics", headers=get_random_header(), timeout=5)
+        data = resp.json()
+        total = float(data['total_market_cap_usd'])
+        btc_d = float(data['btc_dominance'])
+        eth_d = float(data['eth_dominance'])
+        
         return {
-            'source': 'CoinLore',
-            'btc_dom': float(data['btc_d']),
-            'usdt_dom': 5.5,
+            'source': 'CoinCodex',
+            'btc_dom': btc_d,
+            'usdt_dom': 5.5, # Approximate
             'total_val': total,
-            'total_pct': float(data['mcap_change']),
-            'alts_val': total * 0.3,
+            'total_pct': float(data.get('total_market_cap_24h_change', 0)),
+            'alts_val': total * (1 - (btc_d/100) - (eth_d/100)),
             'alts_pct': 0,
             'others_val': total * 0.15,
             'others_pct': 0
         }
-    except:
-        return None
+    except: return None
+
+# --- 7. COINSTATS (NEW) ---
+def get_data_coinstats():
+    try:
+        # Public API
+        resp = requests.get("https://openapiv1.coinstats.app/global-markets", headers=get_random_header(), timeout=5)
+        data = resp.json()
+        total = float(data['marketCap'])
+        btc_d = float(data['btcDominance'])
+        
+        return {
+            'source': 'CoinStats',
+            'btc_dom': btc_d,
+            'usdt_dom': 5.5,
+            'total_val': total,
+            'total_pct': float(data.get('marketCapChange', 0)),
+            'alts_val': total * (1 - (btc_d/100) - 0.14),
+            'alts_pct': 0,
+            'others_val': total * 0.15,
+            'others_pct': 0
+        }
+    except: return None
+
+# --- 8. BINANCE ESTIMATE (LAST RESORT) ---
+def get_data_binance_est():
+    try:
+        # Get BTC Price
+        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5)
+        price = float(r.json()['price'])
+        
+        # Est Supply: 19.8M, Est Dom: 57%
+        btc_mcap = price * 19_800_000
+        total = btc_mcap / 0.57 
+        
+        return {
+            'source': 'Binance Estimate',
+            'btc_dom': 57.0,
+            'usdt_dom': 5.5,
+            'total_val': total,
+            'total_pct': 0,
+            'alts_val': total * 0.30,
+            'alts_pct': 0,
+            'others_val': total * 0.15,
+            'others_pct': 0
+        }
+    except: return None
 
 # --- MAIN CONTROLLER ---
 def get_best_crypto_data():
-    # Try all 6 sources in order
-    data = get_data_cmc()
-    if data: return data
-    data = get_data_paprika()
-    if data: return data
-    data = get_data_cc()
-    if data: return data
-    data = get_data_coingecko()
-    if data: return data
-    data = get_data_coincap()
-    if data: return data
-    data = get_data_coinlore()
-    if data: return data
+    # Order of Priority:
+    sources = [
+        get_data_cmc,
+        get_data_paprika,
+        get_data_cc,
+        get_data_coingecko,
+        get_data_coincap,
+        get_data_coincodex,
+        get_data_coinstats,
+        get_data_binance_est
+    ]
+    
+    for fetcher in sources:
+        data = fetcher()
+        if data: return data
+            
     return None
 
 def get_stock_data(ticker):
@@ -282,7 +318,7 @@ def get_tvl():
 def generate_report():
     c_data = get_best_crypto_data()
     if not c_data:
-        return "⚠️ **CRITICAL:** All 6 API sources failed. Render DNS might be down."
+        return "⚠️ **CRITICAL:** All 8 API sources failed. Internet connection likely down."
 
     tvl_val, tvl_c = get_tvl()
     dow_p, dow_c = get_stock_data("^DJI")
@@ -314,7 +350,7 @@ def generate_report():
 
 # --- TELEGRAM SETUP ---
 async def market_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching (Trying 6 Sources)...")
+    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching (Trying 8 Sources)...")
     await c.bot.edit_message_text(chat_id=u.effective_chat.id, message_id=msg.message_id, text=generate_report(), parse_mode=constants.ParseMode.MARKDOWN)
 
 async def auto_post(c: ContextTypes.DEFAULT_TYPE):
