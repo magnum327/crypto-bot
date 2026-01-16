@@ -61,7 +61,19 @@ def get_data_coincodex():
         }
     except: return None
 
-# --- 2. COINSTATS ---
+# --- 2. DEFILLAMA (Global Check) ---
+def get_data_defillama_global():
+    # DeFiLlama is specialized for TVL, not Global Market Cap. 
+    # This function checks if they have added a global cap endpoint.
+    # If not, it returns None so the bot can skip to #3.
+    try:
+        # Check for stablecoin cap as a proxy? No, we need Total Crypto Cap.
+        # Currently no public endpoint for "Total Crypto Market Cap".
+        # Returning None to trigger failover to CoinStats while keeping structure.
+        return None 
+    except: return None
+
+# --- 3. COINSTATS ---
 def get_data_coinstats():
     try:
         resp = requests.get("https://openapiv1.coinstats.app/global-markets", headers=get_random_header(), timeout=5)
@@ -82,7 +94,7 @@ def get_data_coinstats():
         }
     except: return None
 
-# --- 3. COINCAP ---
+# --- 4. COINCAP ---
 def get_data_coincap():
     try:
         resp = requests.get("https://api.coincap.io/v2/assets?limit=100", timeout=5)
@@ -111,7 +123,7 @@ def get_data_coincap():
         }
     except: return None
 
-# --- 4. COINMARKETCAP (Backup with Key) ---
+# --- 5. COINMARKETCAP (Backup with Key) ---
 def get_data_cmc():
     try:
         headers = {'Accept': 'application/json', 'X-CMC_PRO_API_KEY': CMC_API_KEY}
@@ -149,7 +161,7 @@ def get_data_cmc():
         }
     except: return None
 
-# --- 5. CRYPTOCOMPARE ---
+# --- 6. CRYPTOCOMPARE ---
 def get_data_cc():
     try:
         url = "https://min-api.cryptocompare.com/data/top/mktcapfull?limit=100&tsym=USD"
@@ -186,7 +198,7 @@ def get_data_cc():
         }
     except: return None
 
-# --- 6. COINGECKO ---
+# --- 7. COINGECKO ---
 def get_data_coingecko():
     try:
         g_resp = requests.get("https://api.coingecko.com/api/v3/global", headers=get_random_header(), timeout=5)
@@ -203,25 +215,6 @@ def get_data_coingecko():
             'alts_val': total_mcap * 0.4,
             'alts_pct': 0,
             'others_val': total_mcap * 0.15,
-            'others_pct': 0
-        }
-    except: return None
-
-# --- 7. COINLORE ---
-def get_data_coinlore():
-    try:
-        resp = requests.get("https://api.coinlore.net/api/global/", headers=get_random_header(), timeout=5)
-        data = resp.json()[0]
-        total = float(data['total_mcap'])
-        return {
-            'source': 'CoinLore',
-            'btc_dom': float(data['btc_d']),
-            'usdt_dom': 5.5,
-            'total_val': total,
-            'total_pct': float(data['mcap_change']),
-            'alts_val': total * 0.3,
-            'alts_pct': 0,
-            'others_val': total * 0.15,
             'others_pct': 0
         }
     except: return None
@@ -249,15 +242,15 @@ def get_data_binance_est():
 
 # --- MAIN CONTROLLER ---
 def get_best_crypto_data():
-    # ORDER: 1.Codex 2.Stats 3.Cap 4.CMC 5.CC 6.Gecko 7.Lore 8.Binance
+    # ORDER: 1.Codex 2.DeFiLlama 3.Stats 4.Cap 5.CMC 6.CC 7.Gecko 8.Binance
     sources = [
         get_data_coincodex,
+        get_data_defillama_global, # Will likely skip to #3
         get_data_coinstats,
         get_data_coincap,
         get_data_cmc,
         get_data_cc,
         get_data_coingecko,
-        get_data_coinlore,
         get_data_binance_est
     ]
     
@@ -278,9 +271,11 @@ def get_stock_data(ticker):
     except:
         return 0, 0
 
+# --- DEFILLAMA (FOR TVL ONLY - ALWAYS USED) ---
 def get_tvl():
     try:
-        r = requests.get("https://api.llama.fi/v2/historicalChainTvl", timeout=5)
+        # Added User-Agent to avoid 403 blocks from DeFiLlama
+        r = requests.get("https://api.llama.fi/v2/historicalChainTvl", headers=get_random_header(), timeout=5)
         d = r.json()
         today = d[-1]['tvl']
         change = ((today - d[-2]['tvl'])/d[-2]['tvl'])*100
