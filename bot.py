@@ -55,23 +55,15 @@ def get_data_coincodex():
             'total_val': total,
             'total_pct': float(data.get('total_market_cap_24h_change', 0)),
             'alts_val': total * (1 - (btc_d/100) - (eth_d/100)),
-            'alts_pct': 0,
-            'others_val': total * 0.15,
-            'others_pct': 0
+            'alts_pct': 0
         }
     except: return None
 
 # --- 2. DEFILLAMA (Global Check) ---
 def get_data_defillama_global():
-    # DeFiLlama is specialized for TVL, not Global Market Cap. 
-    # This function checks if they have added a global cap endpoint.
-    # If not, it returns None so the bot can skip to #3.
-    try:
-        # Check for stablecoin cap as a proxy? No, we need Total Crypto Cap.
-        # Currently no public endpoint for "Total Crypto Market Cap".
-        # Returning None to trigger failover to CoinStats while keeping structure.
-        return None 
-    except: return None
+    # DeFiLlama is specialized for TVL, not Global Market Cap.
+    # Returns None to skip to next source.
+    return None 
 
 # --- 3. COINSTATS ---
 def get_data_coinstats():
@@ -88,9 +80,7 @@ def get_data_coinstats():
             'total_val': total,
             'total_pct': float(data.get('marketCapChange', 0)),
             'alts_val': total * (1 - (btc_d/100) - 0.14),
-            'alts_pct': 0,
-            'others_val': total * 0.15,
-            'others_pct': 0
+            'alts_pct': 0
         }
     except: return None
 
@@ -101,11 +91,10 @@ def get_data_coincap():
         data = resp.json().get('data', [])
         if not data: return None
 
-        total = 0; btc = 0; eth = 0; usdt = 0; sum_10 = 0
-        for i, coin in enumerate(data):
+        total = 0; btc = 0; eth = 0; usdt = 0
+        for coin in data:
             mcap = float(coin['marketCapUsd'])
             total += mcap
-            if i < 10: sum_10 += mcap
             if coin['symbol'] == 'BTC': btc = mcap
             if coin['symbol'] == 'ETH': eth = mcap
             if coin['symbol'] == 'USDT': usdt = mcap
@@ -117,9 +106,7 @@ def get_data_coincap():
             'total_val': total,
             'total_pct': 0,
             'alts_val': total - btc - eth,
-            'alts_pct': 0,
-            'others_val': total - sum_10,
-            'others_pct': 0
+            'alts_pct': 0
         }
     except: return None
 
@@ -135,15 +122,14 @@ def get_data_cmc():
         total_mcap = quote['total_market_cap']
         total_change = quote['total_market_cap_yesterday_percentage_change']
         
-        # Listings for Alts
+        # Listings for Alts calculation
         params = {'start': '1', 'limit': '10', 'convert': 'USD', 'sort': 'market_cap'}
         l_resp = requests.get("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest", headers=headers, params=params, timeout=5)
         listings = l_resp.json().get('data', [])
         
-        usdt_mcap = 0; btc_mcap = 0; eth_mcap = 0; sum_top10 = 0
+        usdt_mcap = 0; btc_mcap = 0; eth_mcap = 0
         for coin in listings:
             mcap = coin['quote']['USD']['market_cap']
-            sum_top10 += mcap
             if coin['symbol'] == 'USDT': usdt_mcap = mcap
             if coin['symbol'] == 'BTC': btc_mcap = mcap
             if coin['symbol'] == 'ETH': eth_mcap = mcap
@@ -155,9 +141,7 @@ def get_data_cmc():
             'total_val': total_mcap,
             'total_pct': total_change,
             'alts_val': total_mcap - btc_mcap - eth_mcap,
-            'alts_pct': total_change * 1.05,
-            'others_val': total_mcap - sum_top10,
-            'others_pct': total_change
+            'alts_pct': total_change * 1.05
         }
     except: return None
 
@@ -169,16 +153,16 @@ def get_data_cc():
         data = resp.json().get('Data', [])
         if not data: return None
 
-        total_mcap = 0; total_w_change = 0; sum_top10 = 0; usdt_mcap = 0; btc_mcap = 0; eth_mcap = 0
+        total_mcap = 0; total_w_change = 0; usdt_mcap = 0; btc_mcap = 0; eth_mcap = 0
 
-        for index, coin_obj in enumerate(data):
+        for coin_obj in data:
             if 'RAW' not in coin_obj: continue
             coin = coin_obj['RAW']['USD']
             mcap = coin['MKTCAP']
             change = coin['CHANGEPCT24HOUR']
             total_mcap += mcap
             total_w_change += (mcap * change)
-            if index < 10: sum_top10 += mcap
+            
             if coin['FROMSYMBOL'] == 'USDT': usdt_mcap = mcap
             if coin['FROMSYMBOL'] == 'BTC': btc_mcap = mcap
             if coin['FROMSYMBOL'] == 'ETH': eth_mcap = mcap
@@ -192,9 +176,7 @@ def get_data_cc():
             'total_val': total_mcap,
             'total_pct': total_pct,
             'alts_val': total_mcap - btc_mcap - eth_mcap,
-            'alts_pct': total_pct,
-            'others_val': total_mcap - sum_top10,
-            'others_pct': total_pct
+            'alts_pct': total_pct
         }
     except: return None
 
@@ -213,9 +195,7 @@ def get_data_coingecko():
             'total_val': total_mcap,
             'total_pct': data.get('market_cap_change_percentage_24h_usd', 0),
             'alts_val': total_mcap * 0.4,
-            'alts_pct': 0,
-            'others_val': total_mcap * 0.15,
-            'others_pct': 0
+            'alts_pct': 0
         }
     except: return None
 
@@ -234,9 +214,7 @@ def get_data_binance_est():
             'total_val': total,
             'total_pct': 0,
             'alts_val': total * 0.30,
-            'alts_pct': 0,
-            'others_val': total * 0.15,
-            'others_pct': 0
+            'alts_pct': 0
         }
     except: return None
 
@@ -245,7 +223,7 @@ def get_best_crypto_data():
     # ORDER: 1.Codex 2.DeFiLlama 3.Stats 4.Cap 5.CMC 6.CC 7.Gecko 8.Binance
     sources = [
         get_data_coincodex,
-        get_data_defillama_global, # Will likely skip to #3
+        get_data_defillama_global,
         get_data_coinstats,
         get_data_coincap,
         get_data_cmc,
@@ -306,7 +284,6 @@ def generate_report():
         f"**Crypto Market Cap (Src: {c_data['source']}):**\n"
         f"🌍 Total: {format_with_emoji(c_data['total_val'], c_data['total_pct'])}\n"
         f"🔵 Total ALTS: {format_with_emoji(c_data['alts_val'], c_data['alts_pct'])}\n"
-        f"🟣 ALT Excluding Top 10: {format_with_emoji(c_data['others_val'], c_data['others_pct'])}\n"
         f"🔒 TVL: {format_with_emoji(tvl_val, tvl_c)} (Src: DefiLlama)\n\n"
         
         f"**Traditional Markets (Src: Yahoo Finance):**\n"
