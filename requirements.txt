@@ -3,3 +3,5 @@ requests
 flask
 yfinance
 tradingview-ta
+cloudscraper
+
