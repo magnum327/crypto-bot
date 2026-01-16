@@ -17,22 +17,20 @@ logging.basicConfig(
 
 # --- HELPER FUNCTIONS ---
 def get_random_header():
+    # Rotates User-Agents to try and bypass IP blocks
     user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15',
-        'Mozilla/5.0 (Linux; Android 10; SM-G960U) Chrome/88.0.4324.181 Mobile Safari/537.36'
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
     ]
     return {'User-Agent': random.choice(user_agents), 'Accept': 'application/json'}
 
-def format_with_emoji(value, change_pct=0, is_volume=False):
+def format_with_emoji(value, change_pct=0):
     if value is None: return "N/A"
     if change_pct is None: change_pct = 0
     
     emoji = "🟢" if change_pct >= 0 else "🔴"
     sign = "+" if change_pct >= 0 else ""
-    
-    # Volume doesn't always need green/red emoji, but consistent style is good.
-    # For Volume, we often just want the value, but requested with % change.
     
     if value >= 1_000_000_000_000:
         val_str = f"${value / 1_000_000_000_000:.2f}T"
@@ -47,22 +45,22 @@ def format_with_emoji(value, change_pct=0, is_volume=False):
 #        DATA PROVIDERS (8 LAYERS)
 # ==========================================
 
-# 1. CoinCodex
+# 1. CoinCodex (Primary)
 def fetch_coincodex():
     try:
         resp = requests.get("https://coincodex.com/api/coincodex/get_global_metrics", headers=get_random_header(), timeout=10)
-        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
+        if resp.status_code != 200: return None, f"Err {resp.status_code}"
         d = resp.json()
         return {
             'name': 'CoinCodex',
             'total_cap': float(d['total_market_cap_usd']),
             'total_change': float(d.get('total_market_cap_24h_change', 0)),
             'total_vol': float(d.get('total_volume_usd', 0)),
-            'vol_change': 0, # API doesn't provide vol change %
+            'vol_change': 0, # Not provided
             'btc_dom': float(d['btc_dominance']),
             'eth_dom': float(d['eth_dominance'])
         }, None
-    except Exception as e: return None, str(e)
+    except Exception as e: return None, "Conn Err"
 
 # 2. DeFiLlama (Estimate via Prices)
 def fetch_defillama_est():
@@ -70,7 +68,7 @@ def fetch_defillama_est():
         # Fetch prices/mcap for BTC, ETH, USDT
         url = "https://coins.llama.fi/prices/current/coingecko:bitcoin,coingecko:ethereum,coingecko:tether"
         resp = requests.get(url, headers=get_random_header(), timeout=10)
-        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
+        if resp.status_code != 200: return None, f"Err {resp.status_code}"
         
         c = resp.json().get('coins', {})
         btc = c.get('coingecko:bitcoin', {}).get('mcap', 0)
@@ -92,13 +90,13 @@ def fetch_defillama_est():
             'eth_dom': (eth / est_total) * 100,
             'usdt_dom': (usdt / est_total) * 100
         }, None
-    except Exception as e: return None, str(e)
+    except Exception as e: return None, "Conn Err"
 
 # 3. CoinStats
 def fetch_coinstats():
     try:
         resp = requests.get("https://openapiv1.coinstats.app/global-markets", headers=get_random_header(), timeout=10)
-        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
+        if resp.status_code != 200: return None, f"Err {resp.status_code}"
         d = resp.json()
         return {
             'name': 'CoinStats',
@@ -107,15 +105,15 @@ def fetch_coinstats():
             'total_vol': float(d.get('volume', 0)),
             'vol_change': float(d.get('volumeChange', 0)),
             'btc_dom': float(d['btcDominance']),
-            'eth_dom': 13.5 
+            'eth_dom': 13.5 # Fallback
         }, None
-    except Exception as e: return None, str(e)
+    except Exception as e: return None, "Conn Err"
 
 # 4. CoinCap
 def fetch_coincap():
     try:
         resp = requests.get("https://api.coincap.io/v2/assets?limit=100", timeout=10)
-        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
+        if resp.status_code != 200: return None, f"Err {resp.status_code}"
         d = resp.json().get('data', [])
         if not d: return None, "Empty Data"
         
@@ -139,14 +137,14 @@ def fetch_coincap():
             'eth_dom': (eth/total)*100,
             'usdt_dom': (usdt/total)*100
         }, None
-    except Exception as e: return None, str(e)
+    except Exception as e: return None, "Conn Err"
 
 # 5. CoinMarketCap
 def fetch_cmc():
     try:
         headers = {'Accept': 'application/json', 'X-CMC_PRO_API_KEY': CMC_API_KEY}
         resp = requests.get("https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest", headers=headers, timeout=10)
-        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
+        if resp.status_code != 200: return None, f"Err {resp.status_code}"
         d = resp.json().get('data', {})
         q = d['quote']['USD']
         return {
@@ -158,14 +156,14 @@ def fetch_cmc():
             'btc_dom': d['btc_dominance'],
             'eth_dom': d['eth_dominance']
         }, None
-    except Exception as e: return None, str(e)
+    except Exception as e: return None, "Conn Err"
 
 # 6. CryptoCompare
 def fetch_cc():
     try:
         url = "https://min-api.cryptocompare.com/data/top/mktcapfull?limit=100&tsym=USD"
         resp = requests.get(url, timeout=10)
-        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
+        if resp.status_code != 200: return None, f"Err {resp.status_code}"
         data = resp.json().get('Data', [])
         if not data: return None, "Empty"
 
@@ -175,7 +173,7 @@ def fetch_cc():
             if 'RAW' not in coin_obj: continue
             c = coin_obj['RAW']['USD']
             m = c.get('MKTCAP', 0)
-            v = c.get('TOTALVOLUME24H', c.get('VOLUME24HOURTO', 0)) # Fallback for vol
+            v = c.get('TOTALVOLUME24H', c.get('VOLUME24HOURTO', 0))
             
             total_cap += m
             total_vol += v
@@ -188,20 +186,20 @@ def fetch_cc():
         return {
             'name': 'CryptoCompare',
             'total_cap': total_cap,
-            'total_change': 0, # Calculation complex without history
+            'total_change': 0,
             'total_vol': total_vol,
             'vol_change': 0,
             'btc_dom': (btc/total_cap)*100,
             'eth_dom': (eth/total_cap)*100,
             'usdt_dom': (usdt/total_cap)*100
         }, None
-    except Exception as e: return None, str(e)
+    except Exception as e: return None, "Conn Err"
 
 # 7. CoinGecko
 def fetch_coingecko():
     try:
         resp = requests.get("https://api.coingecko.com/api/v3/global", headers=get_random_header(), timeout=10)
-        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
+        if resp.status_code != 200: return None, f"Err {resp.status_code}"
         d = resp.json().get('data', {})
         return {
             'name': 'CoinGecko',
@@ -213,13 +211,13 @@ def fetch_coingecko():
             'eth_dom': d.get('market_cap_percentage', {}).get('eth', 0),
             'usdt_dom': d.get('market_cap_percentage', {}).get('usdt', 0)
         }, None
-    except Exception as e: return None, str(e)
+    except Exception as e: return None, "Conn Err"
 
 # 8. Binance Estimate
 def fetch_binance_est():
     try:
         r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=10)
-        if r.status_code != 200: return None, "HTTP Err"
+        if r.status_code != 200: return None, "Err"
         price = float(r.json()['price'])
         btc_mcap = price * 19_800_000
         est_total = btc_mcap / 0.57
@@ -233,7 +231,7 @@ def fetch_binance_est():
             'eth_dom': 13.0,
             'usdt_dom': 5.5
         }, None
-    except Exception as e: return None, str(e)
+    except Exception as e: return None, "Conn Err"
 
 
 # ==========================================
@@ -241,7 +239,6 @@ def fetch_binance_est():
 # ==========================================
 
 def get_aggregated_crypto_data():
-    # State bucket
     state = {
         'total_cap': None, 'total_change': None, 'total_src': None, 'total_err': None,
         'total_vol': None, 'vol_change': None, 'vol_src': None,
@@ -250,7 +247,7 @@ def get_aggregated_crypto_data():
         'eth_dom': None
     }
     
-    # PRIORITY ORDER
+    # PRIORITY ORDER 1-8
     providers = [
         fetch_coincodex, 
         fetch_defillama_est, 
@@ -263,7 +260,7 @@ def get_aggregated_crypto_data():
     ]
     
     for provider in providers:
-        # Stop if we have everything
+        # Optimization: Stop if we have everything
         if state['total_cap'] and state['total_vol'] and state['btc_dom'] and state['usdt_dom']:
             break
             
@@ -296,11 +293,10 @@ def get_aggregated_crypto_data():
                 state['usdt_dom'] = data['usdt_dom']
                 state['usdt_src'] = data['name']
             elif state['total_cap']: 
-                # Fallback Estimate
                 state['usdt_dom'] = 5.5
                 state['usdt_src'] = "Est"
 
-        # 5. ETH Dominance (Hidden, for calc)
+        # 5. ETH Dominance (Hidden)
         if not state['eth_dom'] and 'eth_dom' in data:
              state['eth_dom'] = data['eth_dom']
 
@@ -309,26 +305,41 @@ def get_aggregated_crypto_data():
 def get_tvl_data():
     try:
         r = requests.get("https://api.llama.fi/v2/historicalChainTvl", headers=get_random_header(), timeout=10)
-        if r.status_code != 200: return None, None, f"HTTP {r.status_code}"
+        if r.status_code != 200: return None, None, f"Err {r.status_code}"
         d = r.json()
         curr = d[-1]['tvl']
         prev = d[-2]['tvl']
         change = ((curr - prev)/prev)*100
         return curr, change, "DeFiLlama"
     except Exception as e:
-        return None, None, str(e)
+        return None, None, "Conn Err"
 
 def get_stock_data(ticker):
+    # FALLBACK: Try Direct Yahoo API if yfinance fails
     try:
+        # Method 1: yfinance library
         t = yf.Ticker(ticker)
         h = t.history(period="2d")
-        if len(h) < 2: return None, None, "No Data"
-        curr = h['Close'].iloc[-1]
-        prev = h['Close'].iloc[-2]
+        if len(h) >= 2:
+            curr = h['Close'].iloc[-1]
+            prev = h['Close'].iloc[-2]
+            change = ((curr - prev)/prev)*100
+            return curr, change, "Yahoo"
+    except: pass
+    
+    try:
+        # Method 2: Direct Request (Bypasses some blocks)
+        h = {'User-Agent': 'Mozilla/5.0'}
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
+        r = requests.get(url, headers=h, timeout=5)
+        d = r.json()['chart']['result'][0]
+        close = d['indicators']['quote'][0]['close']
+        curr = close[-1]
+        prev = close[-2]
         change = ((curr - prev)/prev)*100
-        return curr, change, "Yahoo"
-    except Exception as e:
-        return None, None, "API Error"
+        return curr, change, "Yahoo(API)"
+    except:
+        return None, None, "Failed"
 
 def generate_report():
     c = get_aggregated_crypto_data()
@@ -337,7 +348,6 @@ def generate_report():
     ndq_val, ndq_pct, ndq_src = get_stock_data("^IXIC")
 
     # --- FORMATTING ---
-    
     output = "📊 **MARKET SNAPSHOT**\n\n"
     output += "**Crypto Market Cap:**\n"
     
@@ -353,7 +363,7 @@ def generate_report():
     else:
         output += f"📊 Vol: ⚠️ Error\n"
         
-    # Total Alts (Calc)
+    # Total Alts
     if c['total_cap'] and c['btc_dom']:
         eth_d = c['eth_dom'] if c['eth_dom'] else 13.0
         alts_val = c['total_cap'] * (1 - (c['btc_dom']/100) - (eth_d/100))
