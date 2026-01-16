@@ -1,7 +1,10 @@
 import logging
-import requests
 import random
+import json
+import asyncio
 import cloudscraper
+import requests
+from curl_cffi import requests as curl_requests
 import yfinance as yf
 from telegram import Update, constants
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
@@ -16,7 +19,64 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER: THE KITCHEN SINK REQUESTER ---
+def fetch_url_kitchen_sink(url, method="GET", json_data=None, headers=None):
+    """
+    Tries 3 different evasion techniques to get data.
+    1. curl_cffi (Impersonates Chrome TLS Fingerprint)
+    2. cloudscraper (Solves Cloudflare JS Challenges)
+    3. Standard Requests (Rotates User-Agents)
+    """
+    if headers is None:
+        headers = {}
+    
+    # Randomize User Agent for all requests
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
+    ]
+    headers['User-Agent'] = random.choice(user_agents)
+
+    # --- ATTEMPT 1: curl_cffi (Best for TLS Blocking) ---
+    try:
+        # Impersonate Chrome 110 to pass TLS checks
+        if method == "GET":
+            resp = curl_requests.get(url, headers=headers, impersonate="chrome110", timeout=10)
+        else:
+            resp = curl_requests.post(url, json=json_data, headers=headers, impersonate="chrome110", timeout=10)
+            
+        if resp.status_code == 200:
+            return resp.json(), None
+    except Exception as e:
+        pass # Silently fail to next method
+
+    # --- ATTEMPT 2: cloudscraper (Best for JS Challenges) ---
+    try:
+        scraper = cloudscraper.create_scraper()
+        if method == "GET":
+            resp = scraper.get(url, headers=headers, timeout=10)
+        else:
+            resp = scraper.post(url, json=json_data, headers=headers, timeout=10)
+            
+        if resp.status_code == 200:
+            return resp.json(), None
+    except Exception as e:
+        pass
+
+    # --- ATTEMPT 3: Standard Requests (Last Resort) ---
+    try:
+        if method == "GET":
+            resp = requests.get(url, headers=headers, timeout=10)
+        else:
+            resp = requests.post(url, json=json_data, headers=headers, timeout=10)
+            
+        if resp.status_code == 200:
+            return resp.json(), None
+        return None, f"Status {resp.status_code}"
+    except Exception as e:
+        return None, f"{type(e).__name__}"
+
+# --- HELPER: FORMATTING ---
 def format_with_emoji(value, change_pct=0):
     if value is None: return "N/A"
     if change_pct is None: change_pct = 0
@@ -34,204 +94,147 @@ def format_with_emoji(value, change_pct=0):
     return f"{emoji} {val_str} ({sign}{change_pct:.2f}%)"
 
 # ==========================================
-#        DATA SOURCES (WITH ERROR DEFINITIONS)
+#        DATA SOURCES
 # ==========================================
 
-def get_tv_batch_data():
-    """
-    Source 1: TradingView Scanner (Cloudscraper)
-    """
-    try:
-        scraper = cloudscraper.create_scraper()
-        url = "https://scanner.tradingview.com/crypto/scan"
-        payload = {
-            "symbols": {
-                "tickers": ["CRYPTOCAP:TOTAL", "CRYPTOCAP:BTC.D", "CRYPTOCAP:USDT.D", "CRYPTOCAP:ETH.D"],
-                "query": { "types": [] }
-            },
-            "columns": ["close", "open", "volume"]
-        }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.tradingview.com/",
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
-
-        resp = scraper.post(url, json=payload, headers=headers, timeout=10)
-        
-        if resp.status_code != 200:
-            return None, f"HTTP {resp.status_code}" # Specific Status Code
-
-        data = resp.json()['data']
-        results = {}
-        tickers = ["TOTAL", "BTC.D", "USDT.D", "ETH.D"]
-        
-        for i, ticker in enumerate(tickers):
-            vals = data[i]['d']
-            current = vals[0]
-            open_p = vals[1]
-            vol = vals[2]
-            
-            change = 0
-            if open_p and open_p != 0:
-                change = ((current - open_p) / open_p) * 100
-                
-            results[ticker] = {'val': current, 'change': change, 'vol': vol}
-            
-        return results, None
-
-    except requests.exceptions.ConnectTimeout:
-        return None, "Timeout"
-    except requests.exceptions.ConnectionError:
-        return None, "Conn Refused"
-    except Exception as e:
-        return None, f"{type(e).__name__}"
-
-def get_tv_lib_fallback(symbol):
-    """
-    Source 2: TradingView Library
-    """
-    try:
-        handler = TA_Handler(
-            symbol=symbol,
-            screener="crypto",
-            exchange="CRYPTOCAP",
-            interval=Interval.INTERVAL_1_DAY
-        )
-        analysis = handler.get_analysis()
-        current = analysis.indicators['close']
-        open_p = analysis.indicators['open']
-        vol = analysis.indicators.get('volume')
-        
-        change = 0
-        if open_p and open_p != 0:
-            change = ((current - open_p) / open_p) * 100
-            
-        return {'val': current, 'change': change, 'vol': vol}
-    except Exception as e:
-        return None # Library errors are usually verbose, we just skip
-
-def get_coincodex_fallback():
-    """
-    Source 3: CoinCodex API
-    """
-    try:
-        resp = requests.get("https://coincodex.com/api/coincodex/get_global_metrics", timeout=10)
-        if resp.status_code != 200: return None, f"HTTP {resp.status_code}"
-        d = resp.json()
+def get_coincodex_data():
+    data, err = fetch_url_kitchen_sink("https://coincodex.com/api/coincodex/get_global_metrics")
+    if data:
         return {
-            'total_cap': float(d['total_market_cap_usd']),
-            'total_change': float(d.get('total_market_cap_24h_change', 0)),
-            'total_vol': float(d.get('total_volume_usd', 0)),
-            'btc_dom': float(d['btc_dominance']),
-            'usdt_dom': 5.5,
-            'eth_dom': float(d['eth_dominance'])
+            'source': 'CoinCodex',
+            'total_cap': float(data['total_market_cap_usd']),
+            'total_change': float(data.get('total_market_cap_24h_change', 0)),
+            'total_vol': float(data.get('total_volume_usd', 0)),
+            'btc_dom': float(data['btc_dominance']),
+            'usdt_dom': 5.5, # Fallback
+            'eth_dom': float(data['eth_dominance'])
         }, None
-    except Exception as e:
-        return None, f"{type(e).__name__}"
+    return None, err
 
-def get_crypto_data_aggregated():
-    # Attempt 1: TradingView Scanner (Preferred)
-    batch, error_msg = get_tv_batch_data()
-    
-    if batch:
+def get_coinstats_data():
+    data, err = fetch_url_kitchen_sink("https://openapiv1.coinstats.app/global-markets")
+    if data:
         return {
-            'source': 'TradingView(Scan)',
-            'total_cap': batch['TOTAL']['val'],
-            'total_change': batch['TOTAL']['change'],
-            'total_vol': batch['TOTAL']['vol'],
-            'btc_dom': batch['BTC.D']['val'],
-            'usdt_dom': batch['USDT.D']['val'],
-            'eth_dom': batch['ETH.D']['val']
-        }
+            'source': 'CoinStats',
+            'total_cap': float(data['marketCap']),
+            'total_change': float(data.get('marketCapChange', 0)),
+            'total_vol': float(data.get('volume', 0)),
+            'btc_dom': float(data['btcDominance']),
+            'usdt_dom': 5.5,
+            'eth_dom': 13.5
+        }, None
+    return None, err
+
+def get_tradingview_scanner():
+    url = "https://scanner.tradingview.com/crypto/scan"
+    payload = {
+        "symbols": {
+            "tickers": ["CRYPTOCAP:TOTAL", "CRYPTOCAP:BTC.D", "CRYPTOCAP:USDT.D", "CRYPTOCAP:ETH.D"],
+            "query": { "types": [] }
+        },
+        "columns": ["close", "open", "volume"]
+    }
+    # Headers are vital for TradingView
+    h = {
+        "Origin": "https://www.tradingview.com",
+        "Referer": "https://www.tradingview.com/"
+    }
     
-    # Store primary error to display if EVERYTHING fails
-    primary_error = error_msg 
-
-    # Attempt 2: TradingView Library
-    total = get_tv_lib_fallback("TOTAL")
-    if total:
-        btc = get_tv_lib_fallback("BTC.D")
-        usdt = get_tv_lib_fallback("USDT.D")
-        eth = get_tv_lib_fallback("ETH.D")
-        
+    data, err = fetch_url_kitchen_sink(url, method="POST", json_data=payload, headers=h)
+    
+    if data:
+        d = data['data']
+        res = {}
+        tickers = ["TOTAL", "BTC.D", "USDT.D", "ETH.D"]
+        for i, t in enumerate(tickers):
+            vals = d[i]['d']
+            curr = vals[0]
+            opn = vals[1]
+            chg = ((curr - opn)/opn)*100 if opn else 0
+            res[t] = {'val': curr, 'change': chg, 'vol': vals[2]}
+            
         return {
-            'source': 'TradingView(Lib)',
-            'total_cap': total['val'],
-            'total_change': total['change'],
-            'total_vol': total['vol'],
-            'btc_dom': btc['val'] if btc else 0,
-            'usdt_dom': usdt['val'] if usdt else 0,
-            'eth_dom': eth['val'] if eth else 0
-        }
+            'source': 'TradingView',
+            'total_cap': res['TOTAL']['val'],
+            'total_change': res['TOTAL']['change'],
+            'total_vol': res['TOTAL']['vol'],
+            'btc_dom': res['BTC.D']['val'],
+            'usdt_dom': res['USDT.D']['val'],
+            'eth_dom': res['ETH.D']['val']
+        }, None
+    return None, err
 
-    # Attempt 3: CoinCodex
-    cc_data, cc_error = get_coincodex_fallback()
-    if cc_data:
-        cc_data['source'] = 'CoinCodex'
-        return cc_data
-
-    # If all failed, return the error from the Primary Source (TradingView)
-    # This answers "Can you get it to define errors"
-    return {'error': primary_error if primary_error else "Blocked"}
+def get_crypto_aggregated():
+    # Priority 1: CoinCodex (Best Data)
+    d, err = get_coincodex_data()
+    if d: return d
+    
+    # Priority 2: TradingView (Scanner API)
+    d, err = get_tradingview_scanner()
+    if d: return d
+    
+    # Priority 3: CoinStats
+    d, err = get_coinstats_data()
+    if d: return d
+    
+    return None
 
 def get_tvl_data():
-    try:
-        h = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get("https://api.llama.fi/v2/historicalChainTvl", headers=h, timeout=10)
-        if r.status_code != 200: return None, None, f"HTTP {r.status_code}"
-        d = r.json()
-        curr = d[-1]['tvl']
-        prev = d[-2]['tvl']
+    data, err = fetch_url_kitchen_sink("https://api.llama.fi/v2/historicalChainTvl")
+    if data:
+        curr = data[-1]['tvl']
+        prev = data[-2]['tvl']
         change = ((curr - prev)/prev)*100
         return curr, change, "DeFiLlama"
-    except Exception as e:
-        return None, None, f"{type(e).__name__}"
+    return None, None, f"Error: {err}"
 
 def get_stock_data(ticker):
+    # Try Direct API first via Kitchen Sink
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
+    data, err = fetch_url_kitchen_sink(url)
+    
+    if data:
+        try:
+            quotes = data['chart']['result'][0]['indicators']['quote'][0]['close']
+            valid = [x for x in quotes if x is not None]
+            if len(valid) >= 2:
+                curr = valid[-1]
+                prev = valid[-2]
+                return curr, ((curr-prev)/prev)*100, "Yahoo(API)"
+        except: pass
+
+    # Fallback to yfinance library
     try:
-        h = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=2d"
-        r = requests.get(url, headers=h, timeout=5)
-        
-        if r.status_code != 200: return None, None, f"HTTP {r.status_code}"
-        
-        d = r.json()['chart']['result'][0]
-        quotes = d['indicators']['quote'][0]['close']
-        valid = [x for x in quotes if x is not None]
-        
-        if len(valid) < 2: return None, None, "NoData"
-        
-        curr = valid[-1]
-        prev = valid[-2]
-        change = ((curr - prev)/prev)*100
-        return curr, change, "Yahoo(API)"
-    except Exception as e:
-        return None, None, f"{type(e).__name__}"
+        t = yf.Ticker(ticker)
+        h = t.history(period="2d")
+        if len(h) >= 2:
+            c = h['Close'].iloc[-1]
+            p = h['Close'].iloc[-2]
+            return c, ((c-p)/p)*100, "Yahoo(Lib)"
+    except: pass
+    
+    return None, None, "Failed"
 
 # --- REPORT GENERATOR ---
 def generate_report():
-    c = get_crypto_data_aggregated()
+    c = get_crypto_aggregated()
     tvl_val, tvl_pct, tvl_src = get_tvl_data()
     sp_val, sp_pct, sp_src = get_stock_data("^GSPC")
     ndq_val, ndq_pct, ndq_src = get_stock_data("^IXIC")
 
     output = "📊 **MARKET SNAPSHOT**\n\n"
     
-    # --- CRYPTO SECTION ---
+    # --- CRYPTO ---
     output += "**Crypto Market Cap:**\n"
-    
-    # Check if we have valid crypto data
-    if c and 'total_cap' in c:
+    if c:
         src = c['source']
         output += f"🌍 Total: {format_with_emoji(c['total_cap'], c['total_change'])} (Src: {src})\n"
         
-        # Volume
         if c['total_vol'] and c['total_vol'] > 1_000_000:
-             if c['total_vol'] > 1_000_000_000:
-                 output += f"📊 Vol: ${c['total_vol']/1_000_000_000:.2f}B (Src: {src})\n"
-             else:
-                 output += f"📊 Vol: {c['total_vol']:,.0f} (Src: {src})\n"
+            if c['total_vol'] > 1_000_000_000:
+                output += f"📊 Vol: ${c['total_vol']/1_000_000_000:.2f}B (Src: {src})\n"
+            else:
+                output += f"📊 Vol: {c['total_vol']:,.0f} (Src: {src})\n"
         else:
              output += f"📊 Vol: N/A\n"
              
@@ -240,42 +243,36 @@ def generate_report():
             alts_val = c['total_cap'] * (1 - (c['btc_dom']/100) - (c['eth_dom']/100))
             output += f"🔵 Total ALTS: {format_with_emoji(alts_val, c['total_change'])} (Calc)\n"
     else:
-        # DISPLAY THE SPECIFIC ERROR DEFINITION
-        err_msg = c.get('error') if c else "Unknown"
-        output += f"🌍 Total: ⚠️ Error ({err_msg})\n"
+        output += "🌍 Total: ⚠️ Error (All Methods Failed)\n"
         output += "📊 Vol: ⚠️ Error\n"
         output += "🔵 Total ALTS: ⚠️ Waiting for Data\n"
 
-    # TVL
+    # --- TVL ---
     if tvl_val:
         output += f"🔒 TVL: {format_with_emoji(tvl_val, tvl_pct)} (Src: {tvl_src})\n"
     else:
-        output += f"🔒 TVL: ⚠️ Error ({tvl_src})\n"
+        output += f"🔒 TVL: ⚠️ {tvl_src}\n"
 
     output += "\n**Crypto Dominance:**\n"
-    if c and 'btc_dom' in c:
+    if c and c['btc_dom']:
         output += f"🟠 BTC: `{c['btc_dom']:.2f}%` (Src: {c['source']})\n"
         output += f"🟢 USDT: `{c['usdt_dom']:.2f}%` (Src: {c['source']})\n\n"
     else:
         output += "🟠 BTC: ⚠️ Error\n🟢 USDT: ⚠️ Error\n\n"
 
-    # --- TRADITIONAL SECTION ---
+    # --- STOCKS ---
     output += "**Traditional Markets:**\n"
-    if sp_val: 
-        output += f"{format_with_emoji(sp_val, sp_pct).split(' (')[0] + f' ({sp_pct:+.2f}%)'} S&P 500 (Src: {sp_src})\n"
-    else: 
-        output += f"⚠️ S&P 500: Error ({sp_src})\n"
+    if sp_val: output += f"{format_with_emoji(sp_val, sp_pct).split(' (')[0] + f' ({sp_pct:+.2f}%)'} S&P 500 (Src: {sp_src})\n"
+    else: output += "⚠️ S&P 500: Failed\n"
 
-    if ndq_val: 
-        output += f"{format_with_emoji(ndq_val, ndq_pct).split(' (')[0] + f' ({ndq_pct:+.2f}%)'} NASDAQ (Src: {ndq_src})"
-    else: 
-        output += f"⚠️ NASDAQ: Error ({ndq_src})"
+    if ndq_val: output += f"{format_with_emoji(ndq_val, ndq_pct).split(' (')[0] + f' ({ndq_pct:+.2f}%)'} NASDAQ (Src: {ndq_src})"
+    else: output += "⚠️ NASDAQ: Failed"
 
     return output
 
 # --- HANDLERS ---
 async def market_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching (Diagnostic Mode)...")
+    msg = await c.bot.send_message(chat_id=u.effective_chat.id, text="🔄 Fetching (Kitchen Sink Mode)...")
     await c.bot.edit_message_text(chat_id=u.effective_chat.id, message_id=msg.message_id, text=generate_report(), parse_mode=constants.ParseMode.MARKDOWN)
 
 async def auto_post(c: ContextTypes.DEFAULT_TYPE):
