@@ -3,5 +3,3 @@ cloudscraper
 tradingview-ta
 yfinance
 python-telegram-bot
-
-
