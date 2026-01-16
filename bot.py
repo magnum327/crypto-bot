@@ -15,6 +15,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# Global variable to store the last error for debugging
+LAST_ERROR = "No attempts yet."
+
 # --- HELPER FUNCTIONS ---
 def get_random_header():
     user_agents = [
@@ -39,10 +42,14 @@ def format_with_emoji(value, change_pct):
 #        DATA SOURCE LAYER CAKE
 # ==========================================
 
-# --- 1. COINCODEX (Primary) ---
+# --- 1. COINCODEX ---
 def get_data_coincodex():
+    global LAST_ERROR
     try:
-        resp = requests.get("https://coincodex.com/api/coincodex/get_global_metrics", headers=get_random_header(), timeout=5)
+        resp = requests.get("https://coincodex.com/api/coincodex/get_global_metrics", headers=get_random_header(), timeout=15)
+        if resp.status_code != 200:
+            LAST_ERROR = f"CoinCodex: {resp.status_code}"
+            return None
         data = resp.json()
         total = float(data['total_market_cap_usd'])
         btc_d = float(data['btc_dominance'])
@@ -51,24 +58,60 @@ def get_data_coincodex():
         return {
             'source': 'CoinCodex',
             'btc_dom': btc_d,
-            'usdt_dom': 5.5, # Approximate
+            'usdt_dom': 5.5, 
             'total_val': total,
             'total_pct': float(data.get('total_market_cap_24h_change', 0)),
             'alts_val': total * (1 - (btc_d/100) - (eth_d/100)),
             'alts_pct': 0
         }
-    except: return None
+    except Exception as e:
+        LAST_ERROR = f"CoinCodex Error: {str(e)}"
+        return None
 
-# --- 2. DEFILLAMA (Global Check) ---
-def get_data_defillama_global():
-    # DeFiLlama is specialized for TVL, not Global Market Cap.
-    # Returns None to skip to next source.
-    return None 
+# --- 2. DEFILLAMA (COINS API) ---
+def get_data_defillama():
+    global LAST_ERROR
+    try:
+        # Fetch prices/mcap for BTC, ETH, USDT
+        url = "https://coins.llama.fi/prices/current/coingecko:bitcoin,coingecko:ethereum,coingecko:tether?searchWidth=4h"
+        resp = requests.get(url, headers=get_random_header(), timeout=15)
+        
+        if resp.status_code != 200:
+            LAST_ERROR = f"DeFiLlama: {resp.status_code}"
+            return None
+            
+        coins = resp.json().get('coins', {})
+        
+        # Extract MCAPs
+        btc_mcap = coins.get('coingecko:bitcoin', {}).get('mcap', 0)
+        eth_mcap = coins.get('coingecko:ethereum', {}).get('mcap', 0)
+        usdt_mcap = coins.get('coingecko:tether', {}).get('mcap', 0)
+        
+        if btc_mcap == 0: return None # Data invalid
+        
+        # ESTIIMATE TOTAL CAP: Assumes BTC Dominance is approx 58% (Adjustable)
+        # This is necessary because DeFiLlama doesn't give a "Global Total"
+        btc_dom_est = 0.58
+        total_est = btc_mcap / btc_dom_est
+        
+        return {
+            'source': 'DeFiLlama (Est)',
+            'btc_dom': (btc_mcap / total_est) * 100,
+            'usdt_dom': (usdt_mcap / total_est) * 100,
+            'total_val': total_est,
+            'total_pct': 0, # No 24h change data in this endpoint
+            'alts_val': total_est - btc_mcap - eth_mcap,
+            'alts_pct': 0
+        }
+    except Exception as e:
+        LAST_ERROR = f"DeFiLlama Error: {str(e)}"
+        return None
 
 # --- 3. COINSTATS ---
 def get_data_coinstats():
+    global LAST_ERROR
     try:
-        resp = requests.get("https://openapiv1.coinstats.app/global-markets", headers=get_random_header(), timeout=5)
+        resp = requests.get("https://openapiv1.coinstats.app/global-markets", headers=get_random_header(), timeout=15)
         data = resp.json()
         total = float(data['marketCap'])
         btc_d = float(data['btcDominance'])
@@ -82,12 +125,15 @@ def get_data_coinstats():
             'alts_val': total * (1 - (btc_d/100) - 0.14),
             'alts_pct': 0
         }
-    except: return None
+    except Exception as e:
+        LAST_ERROR = f"CoinStats Error: {str(e)}"
+        return None
 
 # --- 4. COINCAP ---
 def get_data_coincap():
+    global LAST_ERROR
     try:
-        resp = requests.get("https://api.coincap.io/v2/assets?limit=100", timeout=5)
+        resp = requests.get("https://api.coincap.io/v2/assets?limit=100", timeout=15)
         data = resp.json().get('data', [])
         if not data: return None
 
@@ -108,13 +154,15 @@ def get_data_coincap():
             'alts_val': total - btc - eth,
             'alts_pct': 0
         }
-    except: return None
+    except Exception as e:
+        LAST_ERROR = f"CoinCap Error: {str(e)}"
+        return None
 
-# --- 5. COINMARKETCAP (Backup with Key) ---
+# --- 5. COINMARKETCAP ---
 def get_data_cmc():
     try:
         headers = {'Accept': 'application/json', 'X-CMC_PRO_API_KEY': CMC_API_KEY}
-        g_resp = requests.get("https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest", headers=headers, timeout=5)
+        g_resp = requests.get("https://pro-api.coinmarketcap.com/v1/global-metrics/quotes/latest", headers=headers, timeout=15)
         g_data = g_resp.json().get('data')
         if not g_data: return None
 
@@ -122,9 +170,8 @@ def get_data_cmc():
         total_mcap = quote['total_market_cap']
         total_change = quote['total_market_cap_yesterday_percentage_change']
         
-        # Listings for Alts calculation
         params = {'start': '1', 'limit': '10', 'convert': 'USD', 'sort': 'market_cap'}
-        l_resp = requests.get("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest", headers=headers, params=params, timeout=5)
+        l_resp = requests.get("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest", headers=headers, params=params, timeout=15)
         listings = l_resp.json().get('data', [])
         
         usdt_mcap = 0; btc_mcap = 0; eth_mcap = 0
@@ -149,7 +196,7 @@ def get_data_cmc():
 def get_data_cc():
     try:
         url = "https://min-api.cryptocompare.com/data/top/mktcapfull?limit=100&tsym=USD"
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=15)
         data = resp.json().get('Data', [])
         if not data: return None
 
@@ -183,7 +230,7 @@ def get_data_cc():
 # --- 7. COINGECKO ---
 def get_data_coingecko():
     try:
-        g_resp = requests.get("https://api.coingecko.com/api/v3/global", headers=get_random_header(), timeout=5)
+        g_resp = requests.get("https://api.coingecko.com/api/v3/global", headers=get_random_header(), timeout=15)
         if g_resp.status_code != 200: return None
         data = g_resp.json()['data']
         total_mcap = data['total_market_cap']['usd']
@@ -201,10 +248,10 @@ def get_data_coingecko():
 
 # --- 8. BINANCE ESTIMATE ---
 def get_data_binance_est():
+    global LAST_ERROR
     try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=5)
+        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=15)
         price = float(r.json()['price'])
-        # Estimate using typical supply/dominance figures
         btc_mcap = price * 19_800_000
         total = btc_mcap / 0.57 
         return {
@@ -216,14 +263,16 @@ def get_data_binance_est():
             'alts_val': total * 0.30,
             'alts_pct': 0
         }
-    except: return None
+    except Exception as e:
+        LAST_ERROR = f"Binance Error: {str(e)}"
+        return None
 
 # --- MAIN CONTROLLER ---
 def get_best_crypto_data():
     # ORDER: 1.Codex 2.DeFiLlama 3.Stats 4.Cap 5.CMC 6.CC 7.Gecko 8.Binance
     sources = [
         get_data_coincodex,
-        get_data_defillama_global,
+        get_data_defillama,
         get_data_coinstats,
         get_data_coincap,
         get_data_cmc,
@@ -252,8 +301,7 @@ def get_stock_data(ticker):
 # --- DEFILLAMA (FOR TVL ONLY - ALWAYS USED) ---
 def get_tvl():
     try:
-        # Added User-Agent to avoid 403 blocks from DeFiLlama
-        r = requests.get("https://api.llama.fi/v2/historicalChainTvl", headers=get_random_header(), timeout=5)
+        r = requests.get("https://api.llama.fi/v2/historicalChainTvl", headers=get_random_header(), timeout=15)
         d = r.json()
         today = d[-1]['tvl']
         change = ((today - d[-2]['tvl'])/d[-2]['tvl'])*100
@@ -263,8 +311,10 @@ def get_tvl():
 
 def generate_report():
     c_data = get_best_crypto_data()
+    
+    # DEBUG MODE: If all fail, return the technical error
     if not c_data:
-        return "⚠️ **CRITICAL:** All 8 API sources failed. Internet connection likely down."
+        return f"⚠️ **DEBUG REPORT:** All API sources failed.\n\n**Last Error:** `{LAST_ERROR}`\n\n*Note: If you see 'Max retries exceeded' or 'NameResolutionError', your Render server has no internet access.*"
 
     tvl_val, tvl_c = get_tvl()
     dow_p, dow_c = get_stock_data("^DJI")
