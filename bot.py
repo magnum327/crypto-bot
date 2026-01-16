@@ -1,14 +1,13 @@
 import logging
 import requests
+import yfinance as yf
 from telegram import Update, constants
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 from keep_alive import keep_alive
 
-# --- YOUR KEYS ARE HERE ---
+# --- CONFIGURATION ---
 BOT_TOKEN = '8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU'
-ALPHA_VANTAGE_KEY = 'QYX9U4NWWG72RWZ1'
 
-# Enable logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -16,29 +15,23 @@ logging.basicConfig(
 
 # --- DATA FETCHING FUNCTIONS ---
 
-def get_stock_data_alpha(symbol):
-    """Fetches stock data using Alpha Vantage."""
+def get_stock_data(ticker_symbol):
+    """Fetches price and daily % change using Yahoo Finance (Unlimited)"""
     try:
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHA_VANTAGE_KEY}"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-
-        # Check if API limit reached or error
-        if "Note" in data:
-            logging.warning(f"Alpha Vantage Limit Reached for {symbol}")
+        ticker = yf.Ticker(ticker_symbol)
+        # Get 2 days of data to calculate change
+        history = ticker.history(period="2d")
+        
+        if len(history) < 2:
             return 0.0, 0.0
             
-        quote = data.get('Global Quote', {})
+        current_price = history['Close'].iloc[-1]
+        previous_close = history['Close'].iloc[-2]
         
-        if not quote:
-            return 0.0, 0.0
-
-        current_price = float(quote.get('05. price', 0))
-        change_percent = float(quote.get('10. change percent', '0%').replace('%', ''))
-        
+        change_percent = ((current_price - previous_close) / previous_close) * 100
         return current_price, change_percent
     except Exception as e:
-        logging.error(f"Error fetching {symbol}: {e}")
+        logging.error(f"Error fetching stock {ticker_symbol}: {e}")
         return 0.0, 0.0
 
 def get_crypto_data():
@@ -55,7 +48,6 @@ def get_crypto_data():
         usdt_dom = data['market_cap_percentage'].get('usdt', 0)
         total_mcap = data['total_market_cap'].get('usd', 0)
         
-        # Calculate Altcoin Market Cap
         btc_mcap = total_mcap * (btc_dom / 100)
         alt_mcap = total_mcap - btc_mcap
         
@@ -78,18 +70,17 @@ def format_number(num):
         return f"${num:,.2f}"
 
 def generate_report_text():
-    """Compiles the text for the message."""
     crypto_data = get_crypto_data()
     
-    # Use SPY and QQQ as proxies for S&P 500 and NASDAQ
-    spy_price, spy_change = get_stock_data_alpha("SPY")
-    qqq_price, qqq_change = get_stock_data_alpha("QQQ")
+    # ^GSPC is S&P 500, ^IXIC is NASDAQ
+    sp500_price, sp500_change = get_stock_data("^GSPC")
+    nasdaq_price, nasdaq_change = get_stock_data("^IXIC")
 
     if not crypto_data:
         return "⚠️ Error: Could not fetch crypto data."
 
-    spy_emoji = "🟢" if spy_change >= 0 else "🔴"
-    qqq_emoji = "🟢" if qqq_change >= 0 else "🔴"
+    sp500_emoji = "🟢" if sp500_change >= 0 else "🔴"
+    nasdaq_emoji = "🟢" if nasdaq_change >= 0 else "🔴"
 
     return (
         f"📊 **MARKET SNAPSHOT**\n\n"
@@ -101,9 +92,9 @@ def generate_report_text():
         f"🌍 Total: `{format_number(crypto_data['total_mcap'])}`\n"
         f"🔵 Alts (Excl. BTC): `{format_number(crypto_data['alt_mcap'])}`\n\n"
         
-        f"**Wall Street (ETFs):**\n"
-        f"{spy_emoji} S&P 500 (SPY): `${spy_price:,.2f}` ({spy_change:+.2f}%)\n"
-        f"{qqq_emoji} NASDAQ (QQQ): `${qqq_price:,.2f}` ({qqq_change:+.2f}%)"
+        f"**Traditional Markets:**\n"
+        f"{sp500_emoji} S&P 500: `{sp500_price:,.0f}` ({sp500_change:+.2f}%)\n"
+        f"{nasdaq_emoji} NASDAQ: `{nasdaq_price:,.0f}` ({nasdaq_change:+.2f}%)"
     )
 
 # --- BOT HANDLERS ---
@@ -128,8 +119,6 @@ async def start_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
     for job in current_jobs:
         job.schedule_removal()
-
-    # Post every 4 hours (14400 seconds)
     context.job_queue.run_repeating(auto_post_callback, interval=14400, first=10, chat_id=chat_id, name=str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="✅ Auto-posting started! I will post market stats every 4 hours.")
 
@@ -144,16 +133,10 @@ async def stop_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=chat_id, text="🛑 Auto-posting stopped.")
 
 if __name__ == '__main__':
-    # Start the Keep-Alive Web Server
     keep_alive()
-    
-    # Build the Bot
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Add Handlers
     application.add_handler(CommandHandler('market', market_command))
     application.add_handler(CommandHandler('start_auto', start_auto))
     application.add_handler(CommandHandler('stop_auto', stop_auto))
-    
     print("Bot is running...")
     application.run_polling()
