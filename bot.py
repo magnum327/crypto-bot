@@ -13,7 +13,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- HEADERS ---
+# --- HEADERS (To look like a real browser) ---
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     'Accept': 'application/json'
@@ -29,11 +29,9 @@ def calculate_change(current, previous):
 
 def format_with_emoji(value, change_pct):
     """Formats a number with emoji and percentage."""
-    # Determine Emoji
     emoji = "🟢" if change_pct >= 0 else "🔴"
     sign = "+" if change_pct >= 0 else ""
     
-    # Format the Value (Trillions/Billions)
     if value >= 1_000_000_000_000:
         val_str = f"${value / 1_000_000_000_000:.2f}T"
     elif value >= 1_000_000_000:
@@ -60,28 +58,27 @@ def get_stock_data(ticker_symbol):
         return 0.0, 0.0
 
 def get_crypto_data():
+    """Fetches data from CoinLore (Very lenient with Rate Limits)."""
     try:
-        # 1. Global Data (Total Cap & Change)
-        global_resp = requests.get("https://api.coinpaprika.com/v1/global", headers=HEADERS, timeout=10)
-        g_data = global_resp.json()
+        # 1. Global Data
+        # CoinLore returns a list with 1 item: [{"total_mcap": ..., "mcap_change": ...}]
+        global_resp = requests.get("https://api.coinlore.net/api/global/", headers=HEADERS, timeout=10)
+        g_data = global_resp.json()[0]
         
-        # 2. Top 10 Tickers (To calculate Alts & Others)
-        # We need 'percent_change_24h' to calculate yesterday's cap for each coin
-        tickers_resp = requests.get("https://api.coinpaprika.com/v1/tickers?limit=10&quotes=USD", headers=HEADERS, timeout=10)
-        top_10 = tickers_resp.json()
+        # 2. Top 10 Tickers
+        tickers_resp = requests.get("https://api.coinlore.net/api/tickers/?start=0&limit=10", headers=HEADERS, timeout=10)
+        top_10 = tickers_resp.json()['data']
 
-        # --- Current Metrics ---
-        total_mcap_now = int(g_data.get('market_cap_usd', 0))
-        total_change_pct = float(g_data.get('market_cap_change_24h', 0))
-        btc_dom = float(g_data.get('bitcoin_dominance_percentage', 0))
+        # --- Parse Global Metrics ---
+        total_mcap_now = float(g_data.get('total_mcap', 0))
+        total_change_pct = float(g_data.get('mcap_change', 0))
+        btc_dom = float(g_data.get('btc_d', 0))
         
-        # Calculate Total Cap 24h Ago (Reverse Engineering)
+        # Calculate Total Cap 24h Ago
         total_mcap_old = total_mcap_now / (1 + (total_change_pct / 100))
 
-        # --- Process Top 10 to find Sub-Metrics ---
+        # --- Process Top 10 ---
         usdt_mcap = 0
-        
-        # We need these sums to calculate "Others" and "Alts"
         sum_top10_now = 0
         sum_top10_old = 0
         
@@ -90,15 +87,12 @@ def get_crypto_data():
 
         for coin in top_10:
             symbol = coin['symbol']
-            quote = coin['quotes']['USD']
+            price_now = float(coin['market_cap_usd'])
+            pct_change = float(coin['percent_change_24h'])
             
-            price_now = quote['market_cap']
-            pct_change = quote['percent_change_24h']
-            
-            # Calculate what this coin's mcap was 24h ago
+            # Calculate old price
             price_old = price_now / (1 + (pct_change / 100))
             
-            # Add to sums
             sum_top10_now += price_now
             sum_top10_old += price_old
             
@@ -106,15 +100,15 @@ def get_crypto_data():
             if symbol == 'BTC': btc_now = price_now; btc_old = price_old
             if symbol == 'ETH': eth_now = price_now; eth_old = price_old
 
-        # --- 1. USDT Dominance ---
+        # --- Derived Metrics ---
         usdt_dom = (usdt_mcap / total_mcap_now) * 100 if total_mcap_now > 0 else 0
 
-        # --- 2. Total ALTS (Total - BTC - ETH) ---
+        # Total ALTS (Total - BTC - ETH)
         alts_now = total_mcap_now - btc_now - eth_now
         alts_old = total_mcap_old - btc_old - eth_old
         alts_change = calculate_change(alts_now, alts_old)
 
-        # --- 3. ALT Excluding Top 10 (Total - Top 10) ---
+        # ALT Excluding Top 10 (Total - Top 10)
         others_now = total_mcap_now - sum_top10_now
         others_old = total_mcap_old - sum_top10_old
         others_change = calculate_change(others_now, others_old)
@@ -122,36 +116,30 @@ def get_crypto_data():
         return {
             'btc_dom': btc_dom,
             'usdt_dom': usdt_dom,
-            
             'total_val': total_mcap_now,
             'total_pct': total_change_pct,
-            
             'alts_val': alts_now,
             'alts_pct': alts_change,
-            
             'others_val': others_now,
             'others_pct': others_change
         }
     except Exception as e:
-        logging.error(f"Error crypto: {e}")
+        logging.error(f"Error fetching crypto data: {e}")
         return None
 
 def get_defi_tvl():
     try:
-        # Get historical to find today vs yesterday
         url = "https://api.llama.fi/v2/historicalChainTvl"
         resp = requests.get(url, headers=HEADERS, timeout=10)
         data = resp.json()
-        
         if len(data) < 2: return 0, 0
             
         today = data[-1]['tvl']
         yesterday = data[-2]['tvl']
         change = calculate_change(today, yesterday)
-        
         return today, change
     except Exception as e:
-        logging.error(f"Error TVL: {e}")
+        logging.error(f"Error fetching TVL: {e}")
         return 0, 0
 
 def generate_report_text():
@@ -162,7 +150,8 @@ def generate_report_text():
     sp_p, sp_c = get_stock_data("^GSPC")
     ndq_p, ndq_c = get_stock_data("^IXIC")
 
-    if not c_data: return "⚠️ Error: Could not fetch data."
+    if not c_data:
+        return "⚠️ Error: Could not fetch data. (Check Render logs for details)"
 
     # Stock formatting
     dow_str = format_with_emoji(dow_p, dow_c).split(" (")[0] + f" ({'+' if dow_c>=0 else ''}{dow_c:.2f}%)"
