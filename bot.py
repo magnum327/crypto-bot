@@ -6,12 +6,10 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 # --- CONFIGURATION ---
 
-# 1. The Token you provided
+# 1. YOUR TOKEN
 TOKEN = "8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU"
 
-# 2. TARGET CHAT ID
-# YOU MUST REPLACE THIS with your numeric Chat ID (e.g., 123456789)
-# If you don't know it, run the bot, type /market, and check your computer's console logs.
+# 2. YOUR TARGET CHAT ID
 TARGET_CHAT_ID = "REPLACE_WITH_YOUR_CHAT_ID"
 
 # Enable logging
@@ -23,13 +21,22 @@ logging.basicConfig(
 
 def get_crypto_data():
     try:
-        # CoinGecko for Global Stats
-        cg_url = "https://api.coingecko.com/api/v3/global"
-        cg_data = requests.get(cg_url).json()['data']
+        # HEADERS ARE CRITICAL: They pretend you are a real browser, not a bot.
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
         
-        # DefiLlama for TVL
+        # 1. CoinGecko (Global)
+        cg_url = "https://api.coingecko.com/api/v3/global"
+        cg_response = requests.get(cg_url, headers=headers, timeout=10)
+        cg_response.raise_for_status() # Raises error if status is 400/404/429
+        cg_data = cg_response.json()['data']
+        
+        # 2. DefiLlama (TVL)
         dl_url = "https://api.llama.fi/v2/chains"
-        dl_data = requests.get(dl_url).json()
+        dl_response = requests.get(dl_url, headers=headers, timeout=10)
+        dl_response.raise_for_status()
+        dl_data = dl_response.json()
         total_tvl = sum([chain['tvl'] for chain in dl_data])
 
         return {
@@ -40,17 +47,21 @@ def get_crypto_data():
             "tvl": total_tvl
         }
     except Exception as e:
-        logging.error(f"Crypto Data Error: {e}")
-        return None
+        return f"ERROR: {str(e)}" # Return the actual error message
 
 def get_stock_data():
     try:
         # S&P 500 (^GSPC) and Nasdaq (^IXIC)
         tickers = yf.Tickers("^GSPC ^IXIC")
+        
+        # Fetch history
         sp500 = tickers.tickers["^GSPC"].history(period="5d")
         nasdaq = tickers.tickers["^IXIC"].history(period="5d")
         
-        # Calculate changes based on last two closes
+        if sp500.empty or nasdaq.empty:
+            return "ERROR: Yahoo returned empty data (Likely IP Blocked)"
+
+        # Calculate changes
         sp500_close = sp500['Close'].iloc[-1]
         sp500_prev = sp500['Close'].iloc[-2]
         sp500_change = ((sp500_close - sp500_prev) / sp500_prev) * 100
@@ -66,58 +77,60 @@ def get_stock_data():
             "nasdaq_change": nasdaq_change
         }
     except Exception as e:
-        logging.error(f"Stock Data Error: {e}")
-        return None
+        return f"ERROR: {str(e)}"
 
 def format_number(num):
-    # Formats Trillions (T) and Billions (B)
-    if num >= 1_000_000_000_000:
-        return f"${num / 1_000_000_000_000:.2f}T"
-    elif num >= 1_000_000_000:
-        return f"${num / 1_000_000_000:.2f}B"
-    else:
-        return f"${num:,.2f}"
+    if not isinstance(num, (int, float)): return str(num)
+    if num >= 1_000_000_000_000: return f"${num / 1_000_000_000_000:.2f}T"
+    elif num >= 1_000_000_000: return f"${num / 1_000_000_000:.2f}B"
+    else: return f"${num:,.2f}"
 
 def construct_message():
     crypto = get_crypto_data()
     stocks = get_stock_data()
     
-    if not crypto or not stocks:
-        return "⚠️ *Error fetching market data.* Please try again later."
+    msg = "📊 *MARKET SNAPSHOT* 📊\n\n"
 
-    # Determine Arrows
-    mcap_arrow = "🟢" if crypto['mcap_change'] >= 0 else "🔴"
-    sp_arrow = "🟢" if stocks['sp500_change'] >= 0 else "🔴"
-    nd_arrow = "🟢" if stocks['nasdaq_change'] >= 0 else "🔴"
+    # CRYPTO SECTION
+    if isinstance(crypto, dict):
+        mcap_arrow = "🟢" if crypto['mcap_change'] >= 0 else "🔴"
+        msg += (
+            f"💎 *CRYPTO METRICS*\n"
+            f"• *BTC Dom:* `{crypto['btc_dom']:.1f}%`\n"
+            f"• *USDT Dom:* `{crypto['usdt_dom']:.1f}%`\n"
+            f"• *Total M.Cap:* {format_number(crypto['total_mcap'])} ({mcap_arrow} `{crypto['mcap_change']:.2f}%`)\n"
+            f"• *Total TVL:* {format_number(crypto['tvl'])}\n\n"
+        )
+    else:
+        # If it failed, show the specific error
+        msg += f"💎 *CRYPTO ERROR:* `{crypto}`\n\n"
 
-    # Build Message
-    msg = (
-        f"📊 *MARKET SNAPSHOT* 📊\n\n"
-        f"💎 *CRYPTO METRICS*\n"
-        f"• *BTC Dom:* `{crypto['btc_dom']:.1f}%`\n"
-        f"• *USDT Dom:* `{crypto['usdt_dom']:.1f}%`\n"
-        f"• *Total M.Cap:* {format_number(crypto['total_mcap'])} ({mcap_arrow} `{crypto['mcap_change']:.2f}%`)\n"
-        f"• *Total TVL:* {format_number(crypto['tvl'])}\n\n"
-        f"📈 *TRADITIONAL MARKETS*\n"
-        f"• *S&P 500:* `{stocks['sp500_price']:.2f}` ({sp_arrow} `{stocks['sp500_change']:.2f}%`)\n"
-        f"• *Nasdaq:* `{stocks['nasdaq_price']:.2f}` ({nd_arrow} `{stocks['nasdaq_change']:.2f}%`)"
-    )
+    # STOCKS SECTION
+    if isinstance(stocks, dict):
+        sp_arrow = "🟢" if stocks['sp500_change'] >= 0 else "🔴"
+        nd_arrow = "🟢" if stocks['nasdaq_change'] >= 0 else "🔴"
+        msg += (
+            f"📈 *TRADITIONAL MARKETS*\n"
+            f"• *S&P 500:* `{stocks['sp500_price']:.2f}` ({sp_arrow} `{stocks['sp500_change']:.2f}%`)\n"
+            f"• *Nasdaq:* `{stocks['nasdaq_price']:.2f}` ({nd_arrow} `{stocks['nasdaq_change']:.2f}%`)"
+        )
+    else:
+        # If it failed, show the specific error
+        msg += f"📈 *STOCKS ERROR:* `{stocks}`"
+
     return msg
 
 # --- COMMAND HANDLERS ---
 
 async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Print Chat ID to console so you can grab it for the config
     print(f"!!! YOUR CHAT ID IS: {update.effective_chat.id} !!!")
-    
     msg = construct_message()
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     if TARGET_CHAT_ID == "REPLACE_WITH_YOUR_CHAT_ID":
-        print("⚠️ CANNOT AUTO-POST: TARGET_CHAT_ID is not set in bot.py")
+        print("⚠️ CANNOT AUTO-POST: TARGET_CHAT_ID is not set.")
         return
-        
     msg = construct_message()
     try:
         await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=msg, parse_mode='Markdown')
@@ -125,21 +138,12 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error sending auto-post: {e}")
 
 def main():
-    # Build Application
     application = Application.builder().token(TOKEN).build()
-
-    # Commands
     application.add_handler(CommandHandler("market", market_command))
-
-    # Job Queue (Every 4 hours)
-    # 14400 seconds = 4 hours
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_repeating(auto_post_job, interval=14400, first=10)
-    else:
-        print("Error: Job Queue not available. Did you install 'python-telegram-bot[job-queue]'?")
-
-    # Run
+    
     print("Bot is polling...")
     application.run_polling()
 
