@@ -1,15 +1,14 @@
 import logging
 import requests
 import yfinance as yf
+import os
+from threading import Thread
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # --- CONFIGURATION ---
-
-# 1. YOUR TOKEN
 TOKEN = "8266373667:AAE_Qrfq8VzMJTNE9Om9_rdbzscWFyBmgJU"
-
-# 2. YOUR TARGET CHAT ID
 TARGET_CHAT_ID = "REPLACE_WITH_YOUR_CHAT_ID"
 
 # Enable logging
@@ -17,22 +16,30 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# --- DATA FETCHING ---
+# --- WEB SERVER FOR RENDER (THE FIX) ---
+app = Flask(__name__)
 
+@app.route('/')
+def health_check():
+    return "Bot is running!"
+
+def run_web_server():
+    # Render automatically sets the PORT environment variable
+    port = int(os.environ.get("PORT", 10000))
+    # We run this in a thread so it doesn't block the bot
+    app.run(host='0.0.0.0', port=port)
+
+# --- DATA FETCHING ---
 def get_crypto_data():
     try:
-        # HEADERS ARE CRITICAL: They pretend you are a real browser, not a bot.
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        
-        # 1. CoinGecko (Global)
         cg_url = "https://api.coingecko.com/api/v3/global"
         cg_response = requests.get(cg_url, headers=headers, timeout=10)
-        cg_response.raise_for_status() # Raises error if status is 400/404/429
+        cg_response.raise_for_status()
         cg_data = cg_response.json()['data']
         
-        # 2. DefiLlama (TVL)
         dl_url = "https://api.llama.fi/v2/chains"
         dl_response = requests.get(dl_url, headers=headers, timeout=10)
         dl_response.raise_for_status()
@@ -47,21 +54,17 @@ def get_crypto_data():
             "tvl": total_tvl
         }
     except Exception as e:
-        return f"ERROR: {str(e)}" # Return the actual error message
+        return f"ERROR: {str(e)}"
 
 def get_stock_data():
     try:
-        # S&P 500 (^GSPC) and Nasdaq (^IXIC)
         tickers = yf.Tickers("^GSPC ^IXIC")
-        
-        # Fetch history
         sp500 = tickers.tickers["^GSPC"].history(period="5d")
         nasdaq = tickers.tickers["^IXIC"].history(period="5d")
         
         if sp500.empty or nasdaq.empty:
-            return "ERROR: Yahoo returned empty data (Likely IP Blocked)"
+            return "ERROR: Yahoo returned empty data"
 
-        # Calculate changes
         sp500_close = sp500['Close'].iloc[-1]
         sp500_prev = sp500['Close'].iloc[-2]
         sp500_change = ((sp500_close - sp500_prev) / sp500_prev) * 100
@@ -91,7 +94,6 @@ def construct_message():
     
     msg = "📊 *MARKET SNAPSHOT* 📊\n\n"
 
-    # CRYPTO SECTION
     if isinstance(crypto, dict):
         mcap_arrow = "🟢" if crypto['mcap_change'] >= 0 else "🔴"
         msg += (
@@ -102,10 +104,8 @@ def construct_message():
             f"• *Total TVL:* {format_number(crypto['tvl'])}\n\n"
         )
     else:
-        # If it failed, show the specific error
         msg += f"💎 *CRYPTO ERROR:* `{crypto}`\n\n"
 
-    # STOCKS SECTION
     if isinstance(stocks, dict):
         sp_arrow = "🟢" if stocks['sp500_change'] >= 0 else "🔴"
         nd_arrow = "🟢" if stocks['nasdaq_change'] >= 0 else "🔴"
@@ -115,13 +115,11 @@ def construct_message():
             f"• *Nasdaq:* `{stocks['nasdaq_price']:.2f}` ({nd_arrow} `{stocks['nasdaq_change']:.2f}%`)"
         )
     else:
-        # If it failed, show the specific error
         msg += f"📈 *STOCKS ERROR:* `{stocks}`"
 
     return msg
 
 # --- COMMAND HANDLERS ---
-
 async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"!!! YOUR CHAT ID IS: {update.effective_chat.id} !!!")
     msg = construct_message()
@@ -138,11 +136,18 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
         print(f"Error sending auto-post: {e}")
 
 def main():
+    # 1. Start the "Fake" Web Server in a background thread
+    # This prevents the "Port Scan Timeout" error on Render
+    server_thread = Thread(target=run_web_server)
+    server_thread.daemon = True
+    server_thread.start()
+
+    # 2. Start the Telegram Bot
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("market", market_command))
-    job_queue = application.job_queue
-    if job_queue:
-        job_queue.run_repeating(auto_post_job, interval=14400, first=10)
+    
+    if application.job_queue:
+        application.job_queue.run_repeating(auto_post_job, interval=14400, first=10)
     
     print("Bot is polling...")
     application.run_polling()
