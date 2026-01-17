@@ -1,5 +1,7 @@
+python-telegram-bot
+requests
 curl-cffi
 cloudscraper
 tradingview-ta
 yfinance
-python-telegram-bot
+flask
